@@ -111,6 +111,8 @@ Tunnels usually forward the public hostname in the `Host` header. Another reject
 
 The canonical resource is `{public-url}/mcp`. That is the URL you paste into the app. `--public-url` is an origin with no path (`https://another.example.com`). `http://` is accepted only for a loopback host, so tests can run without TLS. A real connector needs HTTPS, which the tunnel provides. Another does not terminate TLS.
 
+OAuth URI and HTTP Host/Origin ports must be 1 to 65535 written in ASCII decimal without a sign or leading zero; an empty port after `:` is refused. This includes `--public-url`, redirect URIs, resource identifiers and client metadata URLs. A client stored with a port such as `+80` or `0080` must register again before authorization. Previously stored grant and token resource identifiers already have canonical ports and need no migration. Invalid operator Host or origin allow-list entries, including entries with these port spellings, never match and are ignored without a warning; replace them with canonical decimal ports. Host headers containing userinfo (`@`) or a backslash are refused.
+
 ### A person approves each client, on this machine
 
 There is no HTTP request that approves a client. When an app starts the OAuth flow, the browser opens a page that shows the client name, the redirect host, and a short code. The page cannot grant access. On the machine running Another:
@@ -308,7 +310,7 @@ A client that is not using MCP can still poll the feed with a bearer token or an
 curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://another.example.com/activity?since=1h&kinds=mail,request"
 ```
 
-`GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. The kinds are `mail`, `request`, `hold`, `resource`, `session`, `system`, `federation`, `queue` and `sync`; `sync` holds the events a sync skipped as too large to send and their acknowledgements ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)). It never includes message bodies.
+`GET /activity` takes `since` (bare seconds like `3600`, a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. The kinds are `mail`, `request`, `hold`, `resource`, `session`, `system`, `federation`, `queue` and `sync`; `sync` holds the events a sync skipped as too large to send and their acknowledgements ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)). It never includes message bodies.
 
 ## Audit log
 

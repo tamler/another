@@ -18,6 +18,34 @@ const T0: i64 = 1_800_000_000_000;
 const ULID_A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const ONE_TEXT: &str = "invalid, used or expired invite, or the request is not signed for it";
 
+#[test]
+fn unknown_invite_does_not_wait_for_the_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let spoke = Node::new(dir.path(), "spoke");
+    let code = hub
+        .store
+        .create_invite("http://127.0.0.1:7466", &Perm::ALL, 600)
+        .unwrap();
+    let (_, mut request) = spoke.store.prepare_join(&code).unwrap();
+    request.invite_id = "unknown-invite".into();
+    let db = hub.sql();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let store = hub.store.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        sender
+            .send(store.accept_pairing_with_cause(&request))
+            .unwrap();
+    });
+    let result = receiver.recv_timeout(std::time::Duration::from_millis(500));
+    db.execute_batch("ROLLBACK").unwrap();
+    worker.join().unwrap();
+    let (result, cause) = result.expect("unknown invite waited for a writer");
+    assert_eq!(cause, Some(PairRefusal::UnknownInvite));
+    assert!(result.unwrap_err().to_string().contains(ONE_TEXT));
+}
+
 struct Node {
     store: Store,
     home: std::path::PathBuf,

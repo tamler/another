@@ -1,0 +1,53 @@
+{
+  "fixture_note": "Recorded fixture responses for offline tests and fixture-mode dry runs. Zero live API calls.",
+  "stranger_response": {
+    "id": "chatcmpl-fixture-stranger-001",
+    "model": "gpt-5.4-nano",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"proposed_commands\": [{\"step_id\": \"install-1\", \"task\": \"Install from Git with Cargo\", \"command\": \"cargo install --locked --git https://github.com/tamler/another another\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Required until v0.1.0 release archives are published.\"}, {\"step_id\": \"check-1\", \"task\": \"Verify installed version\", \"command\": \"another --version\", \"expected_exit_code\": 0, \"doc_citation\": \"site/docs/install/index.html\", \"notes\": \"Confirm binary is on PATH.\"}, {\"step_id\": \"init-1\", \"task\": \"Initialize local node\", \"command\": \"another init\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Creates local SQLite node in ~/.another or $ANOTHER_HOME.\"}, {\"step_id\": \"status-1\", \"task\": \"Check node status\", \"command\": \"another status\", \"expected_exit_code\": 0, \"doc_citation\": \"site/docs/install/index.html\", \"notes\": \"Confirm local node initialized cleanly.\"}, {\"step_id\": \"hooks-1\", \"task\": \"Preview client hook pack installation\", \"command\": \"another hook install --client all --dry-run\", \"expected_exit_code\": 0, \"doc_citation\": \"site/docs/getting-started/index.html\", \"notes\": \"Preview changes before touching user-global client configs.\"}, {\"step_id\": \"core-1\", \"task\": \"Register first demo agent\", \"command\": \"another agent register alice --program claude\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Registers alice in current project.\"}, {\"step_id\": \"core-2\", \"task\": \"Register second demo agent\", \"command\": \"another agent register bob --program codex\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Registers bob in current project.\"}, {\"step_id\": \"core-3\", \"task\": \"Send request from alice to bob\", \"command\": \"another send --from alice --to bob --subject \\\"Review PR 12\\\" --body \\\"please\\\" --request\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Creates unread message and open request.\"}, {\"step_id\": \"core-4\", \"task\": \"Check bob inbox\", \"command\": \"another inbox --agent bob\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Shows unread message and open request.\"}, {\"step_id\": \"core-5\", \"task\": \"Check activity summary\", \"command\": \"another activity --summary\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Shows recent activity.\"}, {\"step_id\": \"hold-1\", \"task\": \"Acquire path hold for alice\", \"command\": \"another hold acquire --agent alice src/parser.rs\", \"expected_exit_code\": 0, \"doc_citation\": \"README.md\", \"notes\": \"Matches demo caption; flag inferred from CLI at a glance.\"}, {\"step_id\": \"hold-2\", \"task\": \"Check conflicting path hold for bob\", \"command\": \"another hold check --agent bob src/parser.rs\", \"expected_exit_code\": 3, \"doc_citation\": \"README.md\", \"notes\": \"Expected exit 3 on overlap per README.\"}], \"findings\": [{\"id\": \"F1\", \"category\": \"ordering_or_ambiguity\", \"severity\": \"major\", \"step\": \"Quickstart step 1 (Install)\", \"doc_ref\": \"README.md\", \"quote\": \"This matters most when the upgrade changes how repository keys and checkout ids are cached (project_repos). Current builds use v4:-prefixed cache keys\", \"explanation\": \"First-time install instructions in Quickstart step 1 contain several upgrade and federation cache-key paragraphs before the newcomer ever runs another init.\", \"suggested_fix\": \"Move upgrade and cache-key notes to an Upgrading subsection or link to docs/DAEMON.md#upgrading so step 1 stays focused on first-time install.\"}, {\"id\": \"F2\", \"category\": \"missing_step\", \"severity\": \"minor\", \"step\": \"Quickstart step 5 (Try it from the shell)\", \"doc_ref\": \"README.md\", \"quote\": \"another agent register alice --program claude\", \"explanation\": \"README step 5 omits --project and does not mention that --project defaults to the current directory until CLI at a glance later, while site/docs/getting-started/index.html passes --project . explicitly.\", \"suggested_fix\": \"State in step 5 to run the commands inside a project directory (or pass --project . consistently across both docs).\"}, {\"id\": \"F3\", \"category\": \"unpublished_knowledge\", \"severity\": \"minor\", \"step\": \"Quickstart step 5 (Try it from the shell)\", \"doc_ref\": \"README.md\", \"quote\": \"the hold check exits 3 on purpose\", \"explanation\": \"The demo caption references another hold acquire, another hold check, another reply, and another ack, but the copy-paste shell block right above omits those commands and their flags.\", \"suggested_fix\": \"Either add the hold acquire/check snippet directly to step 5 or link straight to the hold command syntax.\"}], \"summary\": {\"could_complete_without_guessing\": true, \"blocking_gaps_count\": 0, \"overall_clarity_score_1_to_5\": 4, \"stranger_verdict\": \"Install and core mail commands are clear and self-contained; minor ordering noise from upgrade internals in step 1 and slight divergence between README and getting-started snippets.\"}}"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 11800,
+      "completion_tokens": 740
+    }
+  },
+  "openai_judge_response": {
+    "id": "chatcmpl-fixture-judge-openai-001",
+    "model": "gpt-5.4-nano",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"verdict\": \"needs_doc_fixes\", \"confirmed_findings\": [{\"finding_id\": \"F1\", \"severity\": \"major\", \"reason\": \"README.md Quickstart step 1 indeed embeds multi-paragraph upgrade and cache-key notes before step 2.\"}, {\"finding_id\": \"F2\", \"severity\": \"minor\", \"reason\": \"README.md omits --project while site/docs/getting-started/index.html includes --project .\"}], \"rejected_findings\": [{\"finding_id\": \"F3\", \"reason\": \"Hold exit code 3 and command names are documented in CLI at a glance in the same README.\"}], \"missed_issues\": [], \"summary\": \"Two grounded clarity improvements for M10 quickstart polish; no hard install blockers.\"}"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 12600,
+      "completion_tokens": 220
+    }
+  },
+  "anthropic_judge_response": {
+    "id": "msg-fixture-judge-anthropic-001",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5-20251001",
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"verdict\": \"needs_doc_fixes\", \"confirmed_findings\": [{\"finding_id\": \"F1\", \"severity\": \"major\", \"reason\": \"Confirmed in README.md step 1: internal upgrade details (project_repos, v4: keys, weak wake cwd restamp) interrupt the first-time install path before another init.\"}, {\"finding_id\": \"F2\", \"severity\": \"minor\", \"reason\": \"Confirmed: README.md step 5 omits --project while site/docs/getting-started/index.html step 4 passes --project .\"}, {\"finding_id\": \"F3\", \"severity\": \"minor\", \"reason\": \"Confirmed: README step 5 mentions hold check exit 3 in the demo caption without showing the exact command flags inline.\"}], \"rejected_findings\": [], \"missed_issues\": [], \"summary\": \"Stranger walkthrough is grounded in the public docs. Moving upgrade notes out of Quickstart step 1 is the highest-value M10 clarity fix.\"}"
+      }
+    ],
+    "usage": {
+      "input_tokens": 12900,
+      "output_tokens": 240
+    }
+  }
+}

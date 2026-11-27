@@ -38,7 +38,7 @@ fn tool_error(e: &another_core::Error) -> String {
             Some("Register the agent with register_agent, or check the name. Hosted grants are approved with `another oauth approve`.")
         }
         another_core::Error::Invalid(m) if m.contains("since") => {
-            Some("Pass since as a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
+            Some("Pass since as bare seconds like 3600, a duration like 1h or 1d, an RFC 3339 time, or an event id from next_since.")
         }
         // Before the agent hint: "an agent description must be one line" names no address.
         another_core::Error::Invalid(m)
@@ -141,7 +141,7 @@ pub struct SendMessageArgs {
 pub struct WhatsNewArgs {
     /// Agent to catch up as (`name` or `name@project`). On a hosted connection, omit this.
     pub agent: Option<String>,
-    /// Activity window: a duration like `1d`, an RFC 3339 time, or an event id. Default: the last day. Unread mail is included either way.
+    /// Activity window: bare seconds like `3600`, a duration like `1d`, an RFC 3339 time, or an event id. Default: the last day. Unread mail is included either way.
     pub since: Option<String>,
     /// Maximum items in each section (default 10, at most 20).
     pub limit: Option<u32>,
@@ -280,7 +280,7 @@ pub struct HeartbeatArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActivityFeedArgs {
-    /// Start point: duration (30m, 2h, 1d), RFC 3339 time, or an event id cursor.
+    /// Start point: duration (bare seconds, 30m, 2h, 1d), RFC 3339 time, or an event id cursor.
     /// Omit for the most recent items.
     pub since: Option<String>,
     /// Maximum items (default 50, max 500).
@@ -292,7 +292,7 @@ pub struct ActivityFeedArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ActivitySummarizeArgs {
-    /// Window start: duration (30m, 2h, 1d), RFC 3339 time, or event id. Default 1h.
+    /// Window start: duration (bare seconds, 30m, 2h, 1d), RFC 3339 time, or event id. Default 1h.
     pub since: Option<String>,
 }
 
@@ -301,7 +301,7 @@ pub struct WorkBoardArgs {
     /// Only this project (slug or absolute path) and sibling checkouts of its repository.
     /// Required on a remote or hosted connection, and must be inside its project globs.
     pub project: Option<String>,
-    /// Window for recent and stopped edits: a duration like `24h` or an RFC 3339 time.
+    /// Window for recent and stopped edits: bare seconds like `3600`, a duration like `24h` or an RFC 3339 time.
     /// Default: the last 24 hours.
     pub since: Option<String>,
     /// Items per list (default 20, at most 200).
@@ -743,13 +743,7 @@ impl AnotherMcp {
     ) -> ToolResult<HeartbeatReport> {
         let scope = crate::remote::current_scope();
         self.run(move |s| {
-            let phase = if a.end {
-                SessionPhase::End
-            } else if a.start {
-                SessionPhase::Start
-            } else {
-                SessionPhase::Beat
-            };
+            let phase = SessionPhase::from_flags(a.start, a.end)?;
             // Remote callers renew or release only holds and leases inside the token's projects.
             s.session_scoped(
                 &a.agent,
@@ -979,7 +973,7 @@ impl AnotherMcp {
                     Since::Time(t) => Some(t),
                     Since::After(_) => {
                         return Err(another_core::Error::Invalid(
-                            "work_board since takes a duration like 24h or an RFC 3339 time".into(),
+                            "work_board since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time".into(),
                         ))
                     }
                 },

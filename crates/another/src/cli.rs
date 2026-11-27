@@ -144,7 +144,8 @@ pub enum Command {
         /// and body; `--template list` shows them and their fields. Implies --request.
         #[arg(long)]
         template: Option<String>,
-        /// A template field as key=value (repeatable), e.g. --field target="PR #170".
+        /// A template field as key=value (repeatable). Keys are trimmed, nonempty and unique;
+        /// malformed or duplicate entries are usage errors (exit 2).
         #[arg(long = "field", value_name = "KEY=VALUE", requires = "template")]
         fields: Vec<String>,
         #[arg(long, short = 'i', default_value = "normal")]
@@ -379,7 +380,7 @@ pub enum Command {
     },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
-        /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
+        /// Start point: a duration (bare seconds, 30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
         #[arg(long)]
         since: Option<String>,
         #[arg(long, default_value_t = 50)]
@@ -395,7 +396,7 @@ pub enum Command {
     /// Count coordination evidence: edits stopped by a hold, holds the edit hook took, mail
     /// pushed into running sessions and whether it was acted on, requests claimed and done.
     Stats {
-        /// Start point: a duration (30m, 48h, 2d), an RFC 3339 time, or an event id.
+        /// Start point: a duration (bare seconds, 30m, 48h, 2d), an RFC 3339 time, or an event id.
         #[arg(long, default_value = "24h")]
         since: String,
     },
@@ -414,7 +415,7 @@ pub enum Command {
         /// Only this project (slug or path) and sibling checkouts of the same repository.
         #[arg(long, short = 'p')]
         project: Option<String>,
-        /// Window for recent and stopped edits: a duration (30m, 24h, 2d) or an RFC 3339 time.
+        /// Window for recent and stopped edits: a duration (bare seconds, 30m, 24h, 2d) or an RFC 3339 time.
         #[arg(long, default_value = "24h")]
         since: String,
         /// Items per list (at most 200).
@@ -721,7 +722,8 @@ pub enum ResourceCmd {
         /// Lease seconds (default 1800, max 86400).
         #[arg(long)]
         ttl: Option<i64>,
-        /// Metadata as key=value (repeatable), e.g. --meta model=llama3 --meta backend=metal.
+        /// Metadata as key=value (repeatable). Keys are trimmed, nonempty and unique;
+        /// malformed or duplicate entries are usage errors (exit 2). Values are kept as given.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
@@ -1123,7 +1125,7 @@ fn board_command(
     let since_ms = match Since::parse(since, store.now())? {
         Since::Time(t) => t,
         Since::After(_) => anyhow::bail!(
-            "board --since takes a duration like 24h or an RFC 3339 time, not an event id"
+            "board --since takes bare seconds like 3600, a duration like 24h or an RFC 3339 time, not an event id"
         ),
     };
     let project = match project {
@@ -1800,11 +1802,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             end,
             keep,
         } => {
-            let phase = match (start, end) {
-                (true, _) => SessionPhase::Start,
-                (_, true) => SessionPhase::End,
-                _ => SessionPhase::Beat,
-            };
+            let phase = SessionPhase::from_flags(start, end)?;
             let hb = store.session(
                 &agent.agent,
                 phase,
@@ -1844,13 +1842,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ttl,
             meta,
         }) => {
-            let mut metadata = serde_json::Map::new();
-            for kv in meta {
-                let (k, v) = kv
-                    .split_once('=')
-                    .ok_or_else(|| anyhow::anyhow!("--meta expects KEY=VALUE, got {kv:?}"))?;
-                metadata.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-            }
+            let metadata = crate::templates::parse_key_values(&meta, "--meta")?
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
             let project = project
                 .map(|p| project_key(&store, &agent.agent, Some(p)))
                 .transpose()?;

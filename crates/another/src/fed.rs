@@ -107,8 +107,8 @@ impl Limits {
 }
 
 /// Whether one side of a sync speaks the signed exchange. Every build from this one on
-/// does, and nothing in the program chooses otherwise; `Unsigned` is kept so the tests can
-/// run a node of this build against one of an older build.
+/// does, and nothing in the program chooses otherwise. Tests and the `test-support`
+/// feature also allow unsigned exchange to simulate an older build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exchange {
     /// A spoke sends a nonce and applies only an answer the hub signed for its request; a
@@ -116,6 +116,7 @@ pub enum Exchange {
     Signed,
     /// What a build before signed answers did: a spoke sends no nonce and checks no
     /// answer; a hub asks for no nonce, signs no answer and records no contact.
+    #[cfg(any(test, feature = "test-support"))]
     Unsigned,
 }
 
@@ -396,6 +397,7 @@ async fn push(
             Ok(nonce) => Some(nonce),
             Err(r) => return *r,
         },
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
     let req: PushRequest = match serde_json::from_slice(&body) {
@@ -426,8 +428,8 @@ async fn push(
 /// signed with this hub's key for the request (its nonce and the text of its signature
 /// header), and the same bytes sent. The spoke's contact time is written once the answer
 /// is built; if that write fails the answer is still sent, since it is correct and the
-/// spoke must not repeat an exchange that succeeded. Without a nonce, which only
-/// [`Exchange::Unsigned`] allows, the answer is what an older build sent.
+/// spoke must not repeat an exchange that succeeded. Without a nonce, which only the
+/// test-only unsigned exchange allows, the answer is what an older build sent.
 async fn answer<T: Serialize>(
     store: &Store,
     node: String,
@@ -481,6 +483,7 @@ async fn pull(
             Ok(nonce) => Some(nonce),
             Err(r) => return *r,
         },
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
     let mut after = 0i64;
@@ -518,11 +521,56 @@ fn agent_for(url: &str) -> ureq::Agent {
         .any(|p| url.starts_with(p));
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(30)));
     if loopback {
         config = config.proxy(None);
     }
     ureq::Agent::new_with_config(config.build())
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn hub_client_disables_redirects() {
+        assert_eq!(
+            agent_for("http://127.0.0.1:7466").config().max_redirects(),
+            0
+        );
+    }
+
+    #[test]
+    fn hub_redirect_is_not_followed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let target = destination.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert!(request.len() < 8192);
+                assert!(reader.read_line(&mut request).unwrap() > 0);
+            }
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://{target}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let result = agent_for(&url).get(&format!("{url}/fed/pull")).call();
+        server.join().unwrap();
+        assert!(
+            matches!(destination.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "redirect destination received a connection"
+        );
+        assert_eq!(result.unwrap().status(), 302);
+    }
 }
 
 /// A sync request or answer that was over a size limit of the other side or of this one.
@@ -602,7 +650,7 @@ fn read<T: serde::de::DeserializeOwned>(
 /// A push or pull that was sent, with what its answer is checked against.
 struct Sent {
     resp: ureq::http::Response<ureq::Body>,
-    /// The nonce sent with the request; `None` only as [`Exchange::Unsigned`].
+    /// The nonce sent with the request; `None` only for the test-only unsigned exchange.
     nonce: Option<String>,
     /// The text of the request's signature header.
     signature: String,
@@ -623,6 +671,7 @@ fn signed(
     // signature: the hub signs it into its answer.
     let nonce = match to.exchange {
         Exchange::Signed => Some(another_core::crypto::request_nonce()?),
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
     let url = format!("{}{path_and_query}", base.trim_end_matches('/'));

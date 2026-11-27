@@ -68,12 +68,12 @@ pub use mail::{
     UnreadAfter, UnreadItem, MAX_SUBJECT_CHARS,
 };
 pub use oauth::{
-    canonical_resource, error_redirect, not_plain_redirect, redirect_host, redirect_is_loopback,
-    redirect_matches, shown_redirect_host, validate_cimd, validate_redirect_uri, Approval,
-    AuthorizationStatus, AuthorizeInput, ClientProfile, ClientRegistration, CodeExchange,
-    IssuedTokens, NotPlainClient, OAuthFail, OauthGrant, PendingAuthorization, PendingView,
-    RefreshExchange, RegisteredClient, ACCESS_TTL_SECS, CLIENT_REDIRECT_NOT_PLAIN,
-    NOT_A_PLAIN_HOST, REDIRECT_URI_NOT_PLAIN,
+    canonical_resource, error_redirect, format_authority, not_plain_redirect, redirect_host,
+    redirect_is_loopback, redirect_matches, shown_redirect_host, split_host_port, validate_cimd,
+    validate_redirect_uri, Approval, AuthorizationStatus, AuthorizeInput, ClientProfile,
+    ClientRegistration, CodeExchange, IssuedTokens, NotPlainClient, OAuthAuthorityError, OAuthFail,
+    OauthGrant, PendingAuthorization, PendingView, RefreshExchange, RegisteredClient,
+    ACCESS_TTL_SECS, CLIENT_REDIRECT_NOT_PLAIN, NOT_A_PLAIN_HOST, REDIRECT_URI_NOT_PLAIN,
 };
 pub use queue::{
     queue_stamp, AdmitItem, AuditFinding, DoneItem, EditItem, FailedNotice, HeldClaim,
@@ -101,7 +101,7 @@ pub use store::{
 };
 /// For the workspace's tests only: build a home at an older schema, and open as another build.
 #[cfg(feature = "test-support")]
-pub use store::{apply_schema, Build};
+pub use store::{apply_schema, force_tighten_error, Build};
 pub use sync_skip::{sync_skip_lines, Skip, SkipAck, SkippedEvent, SYNC_SKIPS_SHOWN};
 pub use time::{fmt_ts, now_ms, parse_duration, parse_ts};
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};

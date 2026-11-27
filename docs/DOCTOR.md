@@ -32,13 +32,15 @@ info  listeners 3 unregistered (lsof): port 5173 node, port 8000 python3, port 1
 | `database` | `another.db`, opened read-only: the schema version and its tables against this build's, SQLite's `quick_check`, the local node, and `build.json` (which build created the home and which last migrated it) | the file is missing, not a database or damaged; the schema is newer than this build; the schema version is negative (not an another database, or edited by hand); the tables are not this build's for that version (a different build changed them); the schema is older and this build will not migrate it (a development build on a home that is not a development home) | the schema is older (a normal command backs it up, then migrates it); the database file is empty (a normal command creates the schema); the database stayed locked for 2 s |
 | `hooks` | Each client's hook config (Claude Code, Codex, Grok, Cursor), and the wrapper script each one runs | never | a config runs a wrapper that is missing or not executable, or that belongs to another home |
 | `server` | One `GET /health` on a loopback address: `--bind`, else the daemon's, else `127.0.0.1:7466` | never | something answers, but not with 200; or the server names another node than this home's (it serves another `ANOTHER_HOME`). Nothing answering is `info` |
-| `daemon` | The launchd service (macOS only) | never | it is installed but not loaded, or loaded but not answering. Serving a different home is `info` |
+| `daemon` | The launchd service on macOS or the systemd user unit on Linux, including its definition, loaded/enabled state and main PID | never | it is installed but not loaded/enabled, or loaded but the server check did not accept its response. An installed definition serving a different home is `info`; a loaded launchd job whose home differs or cannot be verified, or a systemd unit whose home cannot be verified, is `warn` |
 | `peers` | Paired nodes: role, revocation and last sync. "Last sync" is the last sync that ran to its end: on a spoke, of this node with its hub; on a hub, the last push or pull of that spoke it answered. A sync that fails part way does not count | never | the hub has not synced for 24 hours (fix: `another sync, and check the hub URL with another peers`), or a spoke for 7 days (fix: `run another sync on that node; if it is gone for good, another pair revoke <node>`); the hub is reached over plain `http://` at an address that is not loopback (anyone on the network path can read mail and the feed in transit); the hub was joined before invites were signed, so its address was never checked (compare it with the address the hub's owner gives, or join again with a fresh invite made with the same `--perms`); or a pairing record for this node itself exists (an older build wrote it; it is ignored and needs no action). See [FEDERATION.md](FEDERATION.md) |
 | `transports` | `transports.json` in the home ([WAKE.md](WAKE.md#command-transports)), the stored wake targets and the session rows | never | the file was refused (the reason is given); a wake target or a session row names a transport that is not configured; a wake target is the old cmux target `notify`; a program a command transport would start is not found on `PATH`. No file is `info` |
 | `resources` | This node's registered resources with no live lease ([RESOURCES.md](RESOURCES.md#orphans)), read without a sweep | never | any is lapsed: the count, and up to five by kind, name and how long |
 | `listeners` | Listening TCP sockets that no registered resource accounts for, found by the scan `another orphans` runs | never | never. Any found is `info`: the count, and up to five by port and program name. A scan that did not run is `info` too |
 
 The last two rows are [the orphan scan](#the-orphan-scan).
+
+Doctor's server check accepts a successful response when its node id is missing or malformed, or when the local database identity is unavailable. In those cases the daemon row can say `healthy` without verifying identity. `another daemon status` requires a matching node id and reports `healthy no` for those same cases.
 
 Statuses are `ok`, `info` (optional and not set up, or worth a look but not a problem), `warn`, `fail` and `skip` (does not apply here). The exit status is 1 only when a check is `fail`, so a script can gate on it; warnings exit 0.
 
@@ -47,7 +49,7 @@ Statuses are `ok`, `info` (optional and not set up, or worth a look but not a pr
 - **It changes nothing.**
   - It does not create the home or the database, and it does not migrate the database or write an event.
   - Every database read goes through read-only connections, which also cannot checkpoint the WAL into the main file.
-  - It does not edit a hook config or touch the daemon; for the daemon it only reads launchd's record and the plist.
+  - It does not edit a hook config or touch the daemon; it only reads launchd's record and the plist on macOS, or `systemctl --user show` and the unit file on Linux. The daemon row is skipped on other platforms.
   - It runs no sweep: no hold, request or lease is expired, and no resource is released, adopted or reaped.
   - It stops and signals no process.
   - One exception: SQLite may leave the empty `another.db-shm` and `another.db-wal` files that any reader of the database creates.
@@ -65,7 +67,7 @@ Usually well under a second. It is not bounded overall:
 - **Bounded.** A locked database is waited on for at most 2 s, and `/health` gets 2 s.
 - **Not bounded.**
   - `quick_check` reads the whole database, so its time grows with the database's size.
-  - On macOS the daemon row runs `id -u` and `launchctl print`, with no timeout of their own. A stuck `launchd` holds `doctor` up with it.
+  - The daemon row runs `id -u` and `launchctl print` on macOS or `systemctl --user show` on Linux, with no timeout of their own. A stuck service manager holds `doctor` up with it.
   - The orphan scan runs `lsof` or `ss` once, and `ps` once for each unregistered listener and each lapsed resource with a pid, with no timeout of their own. A stuck `lsof` holds `doctor` up with it, and the time grows with the number of unregistered listeners ([known limits](#the-orphan-scan)).
 
 Press Ctrl-C to stop it; it has changed nothing.
