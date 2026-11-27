@@ -4,6 +4,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+#[path = "common/cli.rs"]
+mod cli;
+
 use serde_json::{json, Value};
 
 struct Env {
@@ -30,19 +33,8 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
-        c.args(args)
-            .env("HOME", &self.home)
-            .env("ANOTHER_HOME", &self.another_home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("GROK_HOOK_EVENT")
-            .env_remove("ANOTHER_LOG")
-            // Tests may run inside a multiplexer; keep its pane out of captured targets.
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("HERDR_BIN_PATH")
-            .env_remove("TMUX_PANE")
-            .env_remove("CMUX_SURFACE_ID")
-            .env_remove("TERM_PROGRAM");
+        let mut c = cli::another_cmd(&self.another_home);
+        c.args(args).env("HOME", &self.home);
         c
     }
 
