@@ -287,7 +287,7 @@ struct Authed {
     node: String,
     /// The text of the signature header that was checked; the answer is signed over it.
     signature: String,
-    /// The request's nonce; `None` only as [`Exchange::Unsigned`].
+    /// The request's nonce; `None` only for the test-only unsigned exchange.
     nonce: Option<String>,
 }
 
@@ -371,6 +371,7 @@ async fn authenticate(
         return Err(denied(e).await);
     }
     let nonce = match exchange {
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
         Exchange::SignedAnswersOnly => {
             Some(nonce_of(store, &node, &operation, headers, true).await?)
