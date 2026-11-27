@@ -135,6 +135,18 @@ pub enum SessionPhase {
     End,
 }
 
+impl SessionPhase {
+    /// Convert heartbeat flags to one phase, refusing contradictory input before mutation.
+    pub fn from_flags(start: bool, end: bool) -> Result<Self> {
+        match (start, end) {
+            (true, true) => Err(Error::Invalid("start and end cannot both be true".into())),
+            (true, false) => Ok(Self::Start),
+            (false, true) => Ok(Self::End),
+            (false, false) => Ok(Self::Beat),
+        }
+    }
+}
+
 /// Optional context recorded on `session.started` / `session.ended` events.
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
@@ -2447,6 +2459,26 @@ impl Store {
 mod tests {
     use super::*;
     use crate::Program;
+
+    #[test]
+    fn session_phase_flags_are_exclusive() {
+        assert_eq!(
+            SessionPhase::from_flags(false, false).unwrap(),
+            SessionPhase::Beat
+        );
+        assert_eq!(
+            SessionPhase::from_flags(true, false).unwrap(),
+            SessionPhase::Start
+        );
+        assert_eq!(
+            SessionPhase::from_flags(false, true).unwrap(),
+            SessionPhase::End
+        );
+        assert!(matches!(
+            SessionPhase::from_flags(true, true),
+            Err(Error::Invalid(_))
+        ));
+    }
 
     /// #137 adversarial F1: only waits with a blocker that is no longer live are rechecked,
     /// so a write that ends no hold costs nothing per wait; expiry counts before any sweep.

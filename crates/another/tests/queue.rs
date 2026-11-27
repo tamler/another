@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use another::mcp::AnotherMcp;
+#[cfg(unix)]
+use another_core::QueuePriority;
 use another_core::{
     AdmitItem, DoneItem, EditItem, PointerKind, Program, ProposeItem, QueueCaller, QueueFilter,
-    QueueItem, QueueKind, QueuePriority, QueueState, RegisterAgent, ReleaseItem, Store,
+    QueueItem, QueueKind, QueueState, RegisterAgent, ReleaseItem, Store,
 };
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
 use rmcp::service::RunningService;

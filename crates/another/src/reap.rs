@@ -12,6 +12,47 @@ use crate::scan::{self, Listener, ScanResult};
 /// Default minimum time an orphan must have been orphaned (or alive) before a reap.
 pub const DEFAULT_GRACE_SECONDS: i64 = 10 * 60;
 
+fn accounts_for_listener(resource: &Resource, pid: u32, port: u16) -> bool {
+    resource.node.is_none() && (resource.pid == Some(pid) || resource.port == Some(port))
+}
+
+#[cfg(test)]
+mod listener_accounting_tests {
+    use super::*;
+    use another_core::{LeaseMode, ResourceKind};
+
+    #[test]
+    fn only_local_resources_account_for_local_pid_or_port() {
+        let mut resource = Resource {
+            resource_id: "fixture".into(),
+            node_id: "fixture-node".into(),
+            kind: ResourceKind::DevServer,
+            name: "fixture".into(),
+            endpoint: None,
+            port: Some(5173),
+            pid: Some(1234),
+            project: None,
+            purpose: None,
+            mode: LeaseMode::Shared,
+            owner: None,
+            leases: vec![],
+            refcount: 0,
+            status: "live".into(),
+            lapsed_since: None,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            node: Some("peer".into()),
+            reachable: None,
+        };
+        assert!(!accounts_for_listener(&resource, 1234, 9000));
+        assert!(!accounts_for_listener(&resource, 5678, 5173));
+        resource.node = None;
+        assert!(accounts_for_listener(&resource, 1234, 9000));
+        assert!(accounts_for_listener(&resource, 5678, 5173));
+        assert!(!accounts_for_listener(&resource, 5678, 9000));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Orphan {
     /// `lapsed_lease` (registered, no live lease) or `unregistered_listener` (scan only).
@@ -70,7 +111,7 @@ fn orphans_among(
         for l in &result.listeners {
             let known = registered
                 .iter()
-                .any(|r| r.pid == Some(l.pid) || (r.port.is_some() && r.port == Some(l.port)));
+                .any(|r| accounts_for_listener(r, l.pid, l.port));
             if known || l.pid == me || scan::is_system(&l.command) {
                 continue;
             }
@@ -164,7 +205,7 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
             Some(l) => {
                 if registered
                     .iter()
-                    .any(|r| r.pid == Some(pid) || r.port == Some(l.port))
+                    .any(|r| accounts_for_listener(r, pid, l.port))
                 {
                     plan.blockers.push(format!(
                         "pid {pid} belongs to a registered resource; reap that resource by id"
