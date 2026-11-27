@@ -55,6 +55,11 @@ seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
 MCP `since` inputs also accept bare seconds.
 
+Bearer-token creation and OAuth approval reject project globs that cannot compile
+for matching, even when their syntax is valid. Existing stored globs that cannot
+compile continue to grant no project access. Invalid-glob diagnostics show at most
+the first 80 characters of the pattern, followed by its character count when truncated.
+
 ## Quickstart
 
 **1. Install** with Rust 1.88 or newer:
@@ -104,6 +109,12 @@ Besides session start, prompts and session end, the pack adds a hook after each 
 ```bash
 another daemon install
 ```
+
+On macOS, `another daemon status` checks the loaded label's recorded `ANOTHER_HOME`; on Linux it reads the installed systemd unit's `ANOTHER_HOME`. If it belongs to a different home or cannot be verified, status says so and does not report that daemon's PID or health as this home's.
+
+On macOS and Linux, `another doctor` also reads `ANOTHER_HOME` from the installed service definition and flags a different home. Daemon status distinguishes an address it cannot reach, a bind that is not numeric loopback, and a health response that does not identify this home's node.
+
+Daemon status reports healthy only when `/health` identifies this home's node. `another doctor` checks the service manager on both macOS and Linux.
 
 **4. Give agents the MCP tools.** Add Another as a stdio MCP server in each client:
 
