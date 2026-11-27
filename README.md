@@ -91,6 +91,8 @@ Path holds help Claude Code, Codex and Grok CLI avoid conflicting edits when the
 
 For upgrades and local source installs, see the [install guide](https://toanother.one/docs/install/) and [upgrade checklist](docs/DAEMON.md#upgrading). For a second machine, see [self-hosted federation](docs/FEDERATION.md). A hub can read the messages it relays. [Authenticated remote peers](docs/REMOTE.md) and the [dashboard](docs/DASHBOARD.md) are experimental.
 
+Normal builds expose only signed federation exchange. Library compatibility tests can enable the `another` crate's `test-support` feature to simulate an older unsigned node; workspace tests enable it automatically. Keep that feature off in shipped builds.
+
 ## Uninstall
 
 1. Run `another hook uninstall --client all` to remove Another's hooks while preserving other hooks and settings. [Hook removal](docs/HOOKS.md) explains the config files and backups left behind.
@@ -125,6 +127,10 @@ For upgrades and local source installs, see the [install guide](https://toanothe
 **Now: v0.1.0.** The milestones above are what is on `main`. What happens next is set by [docs/VISION.md](docs/VISION.md) and [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md), approved on 17 Nov 2026: a work queue with admission, a durable record of claims and results, upgrade safety, path holds, and a transport adapter interface for waking agents. v0.1.0 is the single-node queue release, with a target tag date of 1 Dec 2026. Cross-node queue claims follow in v0.2.0. Hosted connectors (OAuth), bearer-token peers, reaping, the dashboard, Windows support and external commands are frozen: they stay in the tree and get only security and data-loss fixes.
 
 Hosted Windows CI still runs on the frozen platform: it runs the workspace tests, including CLI thread exit-status checks, and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack. Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
+
+Security hardening: local listener scans match only local resource registrations, and terminal text flattens Unicode line and paragraph separators. On Unix, database files and build records are created owner-only (0600), and normal database opens tighten those existing files too. Federation hub calls refuse redirects, and unknown pairing invites are refused before taking the write transaction.
+
+Hub backups are secret material: they contain the node's private signing key, mail and authentication records. Keep them owner-only and protect every copy. Unauthenticated refusal audits have a deliberate write budget during floods; individual refusals can be omitted after that budget is exhausted.
 
 Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 
