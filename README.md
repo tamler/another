@@ -4,7 +4,7 @@
 
 **Several agents, one project, one machine.**
 
-[![ci](https://github.com/tamler/another/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tamler/another/actions/workflows/ci.yml) [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-informational)](Cargo.toml) [![platforms macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)](https://toanother.one/docs/install/) [![no GitHub Release yet](https://img.shields.io/badge/GitHub%20Release-none%20yet-lightgrey)](https://github.com/tamler/another/releases)
+[![ci](https://github.com/tamler/another/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tamler/another/actions/workflows/ci.yml) [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![MSRV 1.89](https://img.shields.io/badge/MSRV-1.89-informational)](Cargo.toml) [![platforms macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)](https://toanother.one/docs/install/) [![no GitHub Release yet](https://img.shields.io/badge/GitHub%20Release-none%20yet-lightgrey)](https://github.com/tamler/another/releases)
 
 Another is a background messaging system that helps coding agents work on the same project on the same machine at the same time. It helps reduce editing conflicts, exchange updates and reuse registered resources. Free and open source, always. [Measured resource use](docs/RESOURCE-MEASUREMENTS.md) records a sample on one Mac and its limits.
 
@@ -66,7 +66,7 @@ the first 80 characters of the pattern, followed by its character count when tru
 
 ## Quickstart
 
-**1. Install** with Rust 1.88 or newer:
+**1. Install** with Rust 1.89 or newer:
 
 ```bash
 cargo install --locked --git https://github.com/tamler/another another
@@ -170,6 +170,19 @@ Or, while `another serve` is running, open <http://127.0.0.1:7466/ui>. The page 
 
 ## Status
 
+The separate dependency security workflow runs on pull requests, pushes to `main`,
+daily and on manual dispatch. It uses cargo-audit 0.23.0 and cargo-deny 0.22.1;
+database fetch failures fail the job. To run the same checks locally, install those
+versions with `cargo install --locked --version <version> <cargo-audit|cargo-deny>`,
+then run `cargo audit update-db`, `cargo fetch --locked`, and
+`cargo audit --no-fetch --deny warnings` for cargo-audit. For cargo-deny, run
+`cargo deny --locked --all-features fetch db` and
+`cargo deny --locked --all-features check`.
+The policy in [deny.toml](deny.toml) checks advisories, licenses, dependency bans
+and sources. Both scanners reject unsound, unmaintained, and yanked dependencies,
+including transitive ones. Cargo-deny also rejects unknown sources and warns about
+duplicate versions. No advisories are ignored.
+
 Hosted Windows CI runs the workspace tests, including CLI thread exit-status checks,
 and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
 test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.
@@ -201,7 +214,7 @@ Hub backups are secret material: they contain the node's private signing key, ma
 
 **Now: v0.1.0.** The milestones above are what is on `main`. What happens next is set by [docs/VISION.md](docs/VISION.md) and [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md), approved on 17 Nov 2026: a work queue with admission, a durable record of claims and results, upgrade safety, path holds, and a transport adapter interface for waking agents. v0.1.0 is the single-node queue release, with a target tag date of 1 Dec 2026. Cross-node queue claims follow in v0.2.0. Hosted connectors (OAuth), bearer-token peers, reaping, the dashboard, Windows support and external commands are frozen: they stay in the tree and get only security and data-loss fixes.
 
-Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
+Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.89, copy lint.
 
 ## Guides
 
@@ -303,7 +316,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.88.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.89.
 
 An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the public docs) is documented in [evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays out of default CI, defaults to offline fixture mode (zero spend), and requires explicit live opt-in, an existing durable spend ledger, per-call/run caps, and billing-confirmation flags before making paid API calls.
 

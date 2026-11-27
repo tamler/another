@@ -90,7 +90,7 @@ impl Node {
             let mut stmt = conn
                 .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
                 .unwrap();
-            let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
             let mut found = stmt.query([]).unwrap();
             while let Some(row) = found.next().unwrap() {
                 let mut line = table.to_string();

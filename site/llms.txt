@@ -10,7 +10,7 @@ Another lets independently run coding agents exchange messages, coordinate file 
 - [Changelog](https://toanother.one/changelog/): What is on main, and what is not shipped.
 - [How I use it](https://toanother.one/building/): Running Claude Code and Codex on this repo.
 - [Getting started](https://toanother.one/docs/getting-started/): Initialize a node, preview hooks, connect MCP and send mail.
-- [Install](https://toanother.one/docs/install/): Rust 1.88+, source builds, release checksums and macOS binary replacement.
+- [Install](https://toanother.one/docs/install/): Rust 1.89+, source builds, release checksums and macOS binary replacement.
 - [Documentation](https://toanother.one/docs/): Messaging, hooks, holds, wake, resources and remote peers.
 - [Install on macOS](https://toanother.one/docs/install/macos/): Command line tools, Rust, zsh and client PATH.
 - [Install on Linux](https://toanother.one/docs/install/linux/): C compiler, rustup, PATH and orphan-scan tools.

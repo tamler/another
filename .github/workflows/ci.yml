@@ -24,13 +24,13 @@ jobs:
   # neither the lockfile nor `.cargo/config.toml` can protect it. Cargo finds config from the
   # current directory, so resolving from outside the checkout matches that.
   msrv-fresh-resolve:
-    name: msrv (Rust 1.88, fresh resolve)
+    name: msrv (Rust 1.89, fresh resolve)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@d92bbbb03544f480ed5c7ba4b54020e4ed2c4f65 # 1.89
 
       - name: Resolve from scratch
         working-directory: ${{ runner.temp }}
@@ -75,13 +75,13 @@ jobs:
           DASH_UI_NODE_MODULES="$RUNNER_TEMP/dash-ui/node_modules" node crates/another/src/dashboard/assets/render.test.mjs
 
   msrv:
-    name: msrv (Rust 1.88)
+    name: msrv (Rust 1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@d92bbbb03544f480ed5c7ba4b54020e4ed2c4f65 # 1.89
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2

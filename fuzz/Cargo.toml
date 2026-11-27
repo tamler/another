@@ -8,7 +8,7 @@ publish = false
 cargo-fuzz = true
 
 # Its own workspace: cargo-fuzz needs nightly and libFuzzer, which the main workspace's
-# stable and Rust 1.88 checks must never build. The harness logic lives in
+# stable and Rust 1.89 checks must never build. The harness logic lives in
 # crates/another-fuzz, which the main workspace tests on stable.
 [workspace]
 

@@ -36,7 +36,7 @@
 {"@type":"Question","name":"Can an agent kill my processes?","acceptedAnswer":{"@type":"Answer","text":"Not through MCP: that tool only returns a plan and records a request for a person to act on. The CLI's another reap --confirm does send the signal, and it can't tell who typed it, so an agent with shell access could run it. Your client's permission settings are the boundary there. Nothing reaps automatically, and reaping is never remote."}},
 {"@type":"Question","name":"Can I use it across machines?","acceptedAnswer":{"@type":"Answer","text":"Yes, optionally, through a hub you host. Mail and activity cross, while requests stay on one node and holds only warn. The hub can read relayed mail, and project paths go to every paired node."}},
 
-{"@type":"Question","name":"Are there prebuilt binaries?","acceptedAnswer":{"@type":"Answer","text":"Not yet. No release has been published, so install from source with Cargo and Rust 1.88 or newer. The release workflow targets macOS and static Linux binaries, and those binaries will be unsigned."}},
+{"@type":"Question","name":"Are there prebuilt binaries?","acceptedAnswer":{"@type":"Answer","text":"Not yet. No release has been published, so install from source with Cargo and Rust 1.89 or newer. The release workflow targets macOS and static Linux binaries, and those binaries will be unsigned."}},
 {"@type":"Question","name":"How do I remove it?","acceptedAnswer":{"@type":"Answer","text":"Run another hook uninstall with --client all, remove the MCP entry from each client, run cargo uninstall another, and delete ~/.another if you don't want to keep the mail. Hook uninstall leaves your other hooks alone."}}
 ]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
@@ -103,7 +103,7 @@
       <h2 id="setup">Setup</h2>
       <p class="quiet">Install on <a href="/docs/install/macos/">macOS</a> or <a href="/docs/install/linux/">Linux</a>; see <a href="/docs/install/windows/">Windows limitations and the untested WSL route</a>.</p>
       <h3>Are there prebuilt binaries?</h3>
-      <p>Not yet. No release has been published, so install from source with Cargo and Rust 1.88 or newer. The release workflow targets macOS and static Linux binaries, and those binaries will be unsigned.</p>
+      <p>Not yet. No release has been published, so install from source with Cargo and Rust 1.89 or newer. The release workflow targets macOS and static Linux binaries, and those binaries will be unsigned.</p>
       <h3>How do I remove it?</h3>
       <p>Run <code>another hook uninstall</code> with <code>--client all</code>, remove the MCP entry from each client, run <code>cargo uninstall another</code>, and delete <code>~/.another</code> if you don't want to keep the mail. Hook uninstall leaves your other hooks alone.</p>
       <p class="quiet">Terms are defined in <a href="/docs/concepts/">Concepts</a>.</p>

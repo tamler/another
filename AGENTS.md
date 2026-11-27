@@ -33,7 +33,7 @@ Nice to have (N1 to N5), frozen and cut lists are on the scope page. Frozen surf
 - **Independent review only.** Nobody reviews or merges their own work. No force pushes. No admin bypass.
 - **A development build never runs against the live `~/.another`.** Use `ANOTHER_HOME=$(mktemp -d)` or `--home <tmp>`. Only the installed binary touches the live home.
 - **Schema and decision numbers are assigned at merge time** by the architect. Do not reserve them.
-- CI green on every pull request: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
+- CI green on every pull request: test, clippy `-D warnings`, fmt, MSRV 1.89, copy lint.
 
 ## Clean-room rules (mandatory)
 
@@ -43,7 +43,7 @@ Nice to have (N1 to N5), frozen and cut lists are on the scope page. Frozen surf
 
 ## Locked defaults
 
-Apache-2.0; agent names unique per project; hooks are the fallback everywhere and wake through the adapter interface is core (D84); free and open source always; loopback-only without auth; never reap without human approval; never remote reap; MSRV 1.88.
+Apache-2.0; agent names unique per project; hooks are the fallback everywhere and wake through the adapter interface is core (D84); free and open source always; loopback-only without auth; never reap without human approval; never remote reap; MSRV 1.89.
 
 ## Explicitly OUT of scope
 
