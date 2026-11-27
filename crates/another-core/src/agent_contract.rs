@@ -185,134 +185,147 @@ impl Store {
             }
             AgentOperation::Compatibility { actor, action } => {
                 let fingerprint = serde_json::to_value(&action)?;
-                crate::actor_leases::compatibility_call(self, &actor, id, &fingerprint, |scoped, key| {
-                    // `scoped` carries the typed proof; `key` is the public actor id
-                    // selecting it. Every called mutation revalidates proof and epoch
-                    // inside its own transaction.
-                    let key = key.to_owned();
-                    let projection = match action {
-                        CompatibilityAction::Hold {
-                            project,
-                            paths,
-                            ttl_seconds,
-                        } => serde_json::to_value(scoped.acquire_holds(crate::AcquireHolds {
-                            agent: key,
-                            project,
-                            paths,
-                            ttl_seconds,
-                            exclusive: true,
-                            reason: None,
-                            repo_wide: false,
-                        })?)?,
-                        CompatibilityAction::RenewHolds { hold_ids } => {
-                            serde_json::to_value(scoped.renew_holds(&key, &hold_ids)?)?
-                        }
-                        CompatibilityAction::ReleaseHolds { hold_ids } => {
-                            serde_json::to_value(scoped.release_holds(&key, &hold_ids)?)?
-                        }
-                        CompatibilityAction::RegisterResource {
-                            name,
-                            kind,
-                            endpoint,
-                            ttl_seconds,
-                        } => serde_json::to_value(scoped.register_resource(
-                            crate::RegisterResource {
-                                agent: key,
+                crate::actor_leases::compatibility_call(
+                    self,
+                    &actor,
+                    id,
+                    &fingerprint,
+                    |scoped, key| {
+                        // `scoped` carries the typed proof; `key` is the public actor id
+                        // selecting it. Every called mutation revalidates proof and epoch
+                        // inside its own transaction.
+                        let key = key.to_owned();
+                        let projection = match action {
+                            CompatibilityAction::Hold {
+                                project,
+                                paths,
+                                ttl_seconds,
+                            } => serde_json::to_value(scoped.acquire_holds(
+                                crate::AcquireHolds {
+                                    agent: key,
+                                    project,
+                                    paths,
+                                    ttl_seconds,
+                                    exclusive: true,
+                                    reason: None,
+                                    repo_wide: false,
+                                },
+                            )?)?,
+                            CompatibilityAction::RenewHolds { hold_ids } => {
+                                serde_json::to_value(scoped.renew_holds(&key, &hold_ids)?)?
+                            }
+                            CompatibilityAction::ReleaseHolds { hold_ids } => {
+                                serde_json::to_value(scoped.release_holds(&key, &hold_ids)?)?
+                            }
+                            CompatibilityAction::RegisterResource {
                                 name,
                                 kind,
                                 endpoint,
                                 ttl_seconds,
-                                project: None,
-                                port: None,
-                                pid: None,
-                                purpose: None,
-                                mode: crate::LeaseMode::Shared,
-                                metadata: None,
-                            },
-                        )?)?,
-                        CompatibilityAction::Borrow {
-                            resource_id,
-                            ttl_seconds,
-                        } => serde_json::to_value(scoped.borrow_resource(
-                            &key,
-                            &crate::ResourceRef::Id(resource_id),
-                            ttl_seconds,
-                        )?)?,
-                        CompatibilityAction::ReleaseResource { resource_id, lease } => {
-                            serde_json::to_value(scoped.release_resource_with_lease(
+                            } => serde_json::to_value(scoped.register_resource(
+                                crate::RegisterResource {
+                                    agent: key,
+                                    name,
+                                    kind,
+                                    endpoint,
+                                    ttl_seconds,
+                                    project: None,
+                                    port: None,
+                                    pid: None,
+                                    purpose: None,
+                                    mode: crate::LeaseMode::Shared,
+                                    metadata: None,
+                                },
+                            )?)?,
+                            CompatibilityAction::Borrow {
+                                resource_id,
+                                ttl_seconds,
+                            } => serde_json::to_value(scoped.borrow_resource(
                                 &key,
                                 &crate::ResourceRef::Id(resource_id),
-                                false,
-                                Some(&lease),
-                            )?)?
-                        }
-                        CompatibilityAction::Next { ttl_seconds } => {
-                            serde_json::to_value(scoped.queue_next_with_ttl(&key, ttl_seconds)?)?
-                        }
-                        CompatibilityAction::Done {
-                            item,
-                            summary,
-                            commit,
-                            lease,
-                        } => serde_json::to_value(scoped.queue_done_with_lease(
-                            &key,
-                            &item,
-                            crate::DoneItem {
+                                ttl_seconds,
+                            )?)?,
+                            CompatibilityAction::ReleaseResource { resource_id, lease } => {
+                                serde_json::to_value(scoped.release_resource_with_lease(
+                                    &key,
+                                    &crate::ResourceRef::Id(resource_id),
+                                    false,
+                                    Some(&lease),
+                                )?)?
+                            }
+                            CompatibilityAction::Next { ttl_seconds } => serde_json::to_value(
+                                scoped.queue_next_with_ttl(&key, ttl_seconds)?,
+                            )?,
+                            CompatibilityAction::Done {
+                                item,
                                 summary,
-                                pointer_kind: crate::PointerKind::Commit,
-                                pointer: commit,
-                            },
-                            Some(&lease),
-                        )?)?,
-                        CompatibilityAction::Send {
-                            to,
-                            subject,
-                            body,
-                            create_request,
-                            due_in_seconds,
-                        } => serde_json::to_value(scoped.send_message(crate::SendMessage {
-                            from: key,
-                            to,
-                            subject,
-                            body,
-                            request: create_request.then_some(crate::NewRequest { due_in_seconds }),
-                            ..Default::default()
-                        })?)?,
-                        CompatibilityAction::ClaimRequest { request_id } => {
-                            serde_json::to_value(scoped.update_request(crate::RequestUpdate {
-                                agent: key,
+                                commit,
+                                lease,
+                            } => serde_json::to_value(scoped.queue_done_with_lease(
+                                &key,
+                                &item,
+                                crate::DoneItem {
+                                    summary,
+                                    pointer_kind: crate::PointerKind::Commit,
+                                    pointer: commit,
+                                },
+                                Some(&lease),
+                            )?)?,
+                            CompatibilityAction::Send {
+                                to,
+                                subject,
+                                body,
+                                create_request,
+                                due_in_seconds,
+                            } => serde_json::to_value(
+                                scoped.send_message(crate::SendMessage {
+                                    from: key,
+                                    to,
+                                    subject,
+                                    body,
+                                    request: create_request
+                                        .then_some(crate::NewRequest { due_in_seconds }),
+                                    ..Default::default()
+                                })?,
+                            )?,
+                            CompatibilityAction::ClaimRequest { request_id } => {
+                                serde_json::to_value(scoped.update_request(
+                                    crate::RequestUpdate {
+                                        agent: key,
+                                        request_id,
+                                        action: crate::RequestAction::Claim,
+                                        due_in_seconds: None,
+                                        note: None,
+                                    },
+                                )?)?
+                            }
+                            CompatibilityAction::Request {
                                 request_id,
-                                action: crate::RequestAction::Claim,
-                                due_in_seconds: None,
-                                note: None,
-                            })?)?
-                        }
-                        CompatibilityAction::Request {
-                            request_id,
-                            request_action,
-                            ttl_seconds,
-                            lease,
-                            note,
-                        } => serde_json::to_value(scoped.update_request_with_lease(
-                            crate::RequestUpdate {
-                                agent: key,
-                                request_id,
-                                action: request_action,
+                                request_action,
+                                ttl_seconds,
+                                lease,
                                 note,
-                                due_in_seconds: None,
-                            },
-                            None,
-                            ttl_seconds,
-                            lease.as_ref(),
-                        )?)?,
-                    };
-                    let leases: Vec<_> = self
-                        .right_leases()?
-                        .into_iter()
-                        .filter(|l| l.owner_actor_id == actor.actor_id)
-                        .collect();
-                    Ok(json!({"projection":projection, "leases":leases}))
-                })?
+                            } => serde_json::to_value(scoped.update_request_with_lease(
+                                crate::RequestUpdate {
+                                    agent: key,
+                                    request_id,
+                                    action: request_action,
+                                    note,
+                                    due_in_seconds: None,
+                                },
+                                None,
+                                ttl_seconds,
+                                lease.as_ref(),
+                            )?)?,
+                        };
+                        let leases: Vec<_> = self
+                            .right_leases()?
+                            .into_iter()
+                            .filter(|l| l.owner_actor_id == actor.actor_id)
+                            .collect();
+                        Ok(json!({"projection":projection, "leases":leases}))
+                    },
+                )?
             }
             AgentOperation::Register {
                 participant,

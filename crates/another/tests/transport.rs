@@ -141,7 +141,9 @@ impl Fx {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = root.join("home").join(".another");
         let (clock, handle) = Clock::manual(real_now());
-        let store = Store::open_with_clock(&home, clock).unwrap().unguarded_repair();
+        let store = Store::open_with_clock(&home, clock)
+            .unwrap()
+            .unguarded_repair();
         let fx = Fx {
             _dir: dir,
             root,

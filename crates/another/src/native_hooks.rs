@@ -409,7 +409,10 @@ mod tests {
         let store = Store::open_in_memory(Clock::System).unwrap();
         let path = dir.path().join("participant.json");
         participant(&store, &path).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let Err(refused) = participant(&store, &path) else {
             panic!("a group- or world-readable grant was accepted");

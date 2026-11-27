@@ -34,7 +34,9 @@ struct Spoke {
 
 fn spoke(root: &Path, name: &str, clock: Clock) -> Spoke {
     let home = root.join(name);
-    let store = Store::open_with_clock(&home, clock).unwrap().unguarded_repair();
+    let store = Store::open_with_clock(&home, clock)
+        .unwrap()
+        .unguarded_repair();
     store.set_node_name(name).unwrap();
     Spoke { store, home }
 }

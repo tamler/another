@@ -136,7 +136,14 @@ fn repair_holds_meet_only_compatibility_holds_not_edit_admission_leases() {
         reason: None,
         repo_wide: false,
     };
-    assert_eq!(repair.acquire_holds(hold("src/a.rs")).unwrap().granted.len(), 1);
+    assert_eq!(
+        repair
+            .acquire_holds(hold("src/a.rs"))
+            .unwrap()
+            .granted
+            .len(),
+        1
+    );
     let file = |name: &str| work.join("src").join(name).to_string_lossy().into_owned();
     store
         .begin_actor_edit(&actor.proof, "edit-a", &[file("a.rs")], None)
@@ -145,7 +152,11 @@ fn repair_holds_meet_only_compatibility_holds_not_edit_admission_leases() {
         .begin_actor_edit(&actor.proof, "edit-b", &[file("b.rs")], None)
         .unwrap();
     assert_eq!(
-        repair.acquire_holds(hold("src/b.rs")).unwrap().granted.len(),
+        repair
+            .acquire_holds(hold("src/b.rs"))
+            .unwrap()
+            .granted
+            .len(),
         1,
         "a repair hold does not consult edit-admission leases"
     );
@@ -165,7 +176,10 @@ fn repair_holds_meet_only_compatibility_holds_not_edit_admission_leases() {
     assert_eq!(compat["projection"]["granted"].as_array().unwrap().len(), 1);
     // A repair hold does see an actor's compatibility hold.
     let blocked = repair.acquire_holds(hold("src/c.rs")).unwrap();
-    assert!(blocked.granted.is_empty(), "a repair hold yields to an actor hold");
+    assert!(
+        blocked.granted.is_empty(),
+        "a repair hold yields to an actor hold"
+    );
     assert_eq!(blocked.conflicts.len(), 1);
     // And an actor's compatibility hold over an existing repair hold is granted.
     let over = act(
@@ -274,8 +288,14 @@ fn the_actor_proof_never_reaches_events_errors_wire_events_or_the_database() {
     let on_disk = String::from_utf8_lossy(&on_disk);
     for needle in needles {
         assert!(!events.contains(needle), "event log carries {needle:?}");
-        assert!(!wire.contains(needle), "federation wire events carry {needle:?}");
-        assert!(!on_disk.contains(needle), "the home's files carry {needle:?}");
+        assert!(
+            !wire.contains(needle),
+            "federation wire events carry {needle:?}"
+        );
+        assert!(
+            !on_disk.contains(needle),
+            "the home's files carry {needle:?}"
+        );
         for error in &errors {
             assert!(!error.contains(needle), "error carries {needle:?}: {error}");
         }
@@ -429,7 +449,9 @@ fn a_minted_actors_mail_is_delivered_across_federation() {
     })
     .unwrap();
     let page = hub.pull_for(spoke.node_id(), 0, 10_000).unwrap();
-    let imported = spoke.ingest(hub.node_id(), &page.events, &page.nodes).unwrap();
+    let imported = spoke
+        .ingest(hub.node_id(), &page.events, &page.nodes)
+        .unwrap();
     assert!(imported.rejected.is_empty());
     let grant = spoke.enroll_participant().unwrap();
     let actor = spoke
@@ -454,7 +476,11 @@ fn a_minted_actors_mail_is_delivered_across_federation() {
         .unwrap();
     assert!(report.rejected.is_empty());
     let inbox = hub.inbox("owner", InboxQuery::default()).unwrap();
-    assert_eq!(inbox.messages.len(), 1, "the hub recipient got the actor's mail");
+    assert_eq!(
+        inbox.messages.len(),
+        1,
+        "the hub recipient got the actor's mail"
+    );
     // The directory entry is the public id only; no proof travels.
     let wire = serde_json::to_string(&events).unwrap();
     assert!(!wire.contains(&actor.proof.secret));

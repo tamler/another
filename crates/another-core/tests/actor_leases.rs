@@ -229,7 +229,12 @@ fn end_closes_dependent_tree_and_late_failure_cannot_restore_rights() {
             Some(3600),
         );
         f.store
-            .begin_actor_edit(proof, "pre", &[f.file(&format!("file-{}", proof.actor_id))], None)
+            .begin_actor_edit(
+                proof,
+                "pre",
+                &[f.file(&format!("file-{}", proof.actor_id))],
+                None,
+            )
             .unwrap();
     }
     let released = f

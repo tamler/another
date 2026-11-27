@@ -3268,7 +3268,9 @@ mod tests {
         let (clock, store_now) = crate::Clock::manual(1_000_000);
         let store = Store::open_in_memory(clock).unwrap().unguarded_repair();
         let (peer_clock, peer_now) = crate::Clock::manual(1_000_000);
-        let peer = Store::open_in_memory(peer_clock).unwrap().unguarded_repair();
+        let peer = Store::open_in_memory(peer_clock)
+            .unwrap()
+            .unguarded_repair();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_str().unwrap().to_owned();
         let actor = store
