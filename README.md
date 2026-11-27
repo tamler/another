@@ -16,6 +16,8 @@ Claude Code and Codex cannot see each other without something shared. They can e
 
 `another serve --federation` without `--auth` serves only `/fed/*` and `/health`, even when a proxy rewrites `Host` to loopback. Add `--auth` for token-gated MCP and activity routes; an explicitly enabled dashboard on that federation listener also needs a token. Unauthenticated rejection audits are capped at 32 rows per server store per 60 seconds. Wake subjects and edit-denial hold values use the hook quoting rules. Foreign resource checks use IP literals only and a bounded probe budget; see [federation](docs/FEDERATION.md).
 
+Normal builds expose only signed federation exchange. Library compatibility tests can enable the `another` crate's `test-support` feature to simulate an older unsigned node; workspace tests enable it automatically. Keep that feature off in shipped builds.
+
 ## Why
 
 This is the failure I kept hitting:
@@ -157,6 +159,10 @@ Hosted Windows CI runs the workspace tests, including CLI thread exit-status che
 and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
 test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.
 Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
+
+Security hardening: local listener scans match only local resource registrations, and terminal text flattens Unicode line and paragraph separators. On Unix, database files and build records are created owner-only (0600), and normal database opens tighten those existing files too. Federation hub calls refuse redirects, and unknown pairing invites are refused before taking the write transaction.
+
+Hub backups are secret material: they contain the node's private signing key, mail and authentication records. Keep them owner-only and protect every copy. Unauthenticated refusal audits have a deliberate write budget during floods; individual refusals can be omitted after that budget is exhausted.
 
 | Milestone | Scope | Status |
 |---|---|---|
