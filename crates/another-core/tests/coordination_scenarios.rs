@@ -297,10 +297,7 @@ fn claim_release_requires_owning_session_end_or_silent_grace() {
         .claim
         .unwrap()
         .session_bound;
-    assert!(
-        !session_bound,
-        "ended session cannot bind the new claim"
-    );
+    assert!(!session_bound, "ended session cannot bind the new claim");
     clock_handle.fetch_add(GRACE_MS - 1, Ordering::SeqCst);
     assert!(store.queue_next("observer").unwrap().claimed.is_none());
     assert_eq!(
@@ -391,11 +388,16 @@ fn admission_racing_next_never_claims_before_admission() {
         let _ = next_go_tx.send(());
         admission.join().expect("admission actor completed");
         let next = next.join().expect("next actor completed");
-        assert!(ready, "attempt {attempt}: both actors reached bounded start gate");
+        assert!(
+            ready,
+            "attempt {attempt}: both actors reached bounded start gate"
+        );
         let events = store.events(1000).unwrap();
         let admitted_seq = events
             .iter()
-            .find(|event| event.kind == "queue.admitted" && event.payload["item_id"] == item.item_id)
+            .find(|event| {
+                event.kind == "queue.admitted" && event.payload["item_id"] == item.item_id
+            })
             .unwrap()
             .seq;
         let item_row = store.queue_item(&item.item_id).unwrap();
@@ -408,7 +410,9 @@ fn admission_racing_next_never_claims_before_admission() {
             );
             let claimed_seq = events
                 .iter()
-                .find(|event| event.kind == "queue.claimed" && event.payload["item_id"] == item.item_id)
+                .find(|event| {
+                    event.kind == "queue.claimed" && event.payload["item_id"] == item.item_id
+                })
                 .unwrap()
                 .seq;
             assert!(
