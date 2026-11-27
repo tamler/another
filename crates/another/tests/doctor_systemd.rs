@@ -2,7 +2,12 @@
 #![cfg(target_os = "linux")]
 
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Output};
+use std::process::Output;
+
+#[path = "common/cli.rs"]
+mod cli;
+
+use cli::another_cmd;
 
 #[test]
 fn doctor_checks_the_systemd_user_unit() {
@@ -24,10 +29,9 @@ fn doctor_checks_the_systemd_user_unit() {
     ));
     let path = std::env::join_paths(paths).unwrap();
     let run = |args: &[&str], state: &str| -> Output {
-        Command::new(env!("CARGO_BIN_EXE_another"))
+        another_cmd(&data)
             .args(args)
             .env("HOME", &home)
-            .env("ANOTHER_HOME", &data)
             .env("PATH", &path)
             .env("TEST_UNIT_STATE", state)
             .env_remove("XDG_CONFIG_HOME")

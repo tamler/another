@@ -5,7 +5,7 @@
 //! Nothing is written either way.
 
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use another::mcp::AnotherMcp;
 use another_core::*;
@@ -13,11 +13,14 @@ use rmcp::model::{CallToolRequestParams, ClientConfig};
 use rmcp::ServiceExt;
 use serde_json::{json, Value};
 
+#[path = "common/cli.rs"]
+mod cli;
+
+use cli::another_cmd;
+
 fn another(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
+    another_cmd(home)
         .args(args)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
         .stdin(Stdio::null())
         .output()
         .unwrap()

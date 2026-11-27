@@ -3,7 +3,12 @@
 //! grants nothing. Only the exit 3 of one overlap was tested before (cli_errors.rs).
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[path = "common/cli.rs"]
+mod cli;
+
+use cli::another_cmd;
 
 struct Fx {
     _dir: tempfile::TempDir,
@@ -39,12 +44,9 @@ impl Fx {
 
     /// Exit status and stdout.
     fn run(&self, args: &[&str]) -> (i32, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = another_cmd(&self.home)
             .args(args)
             .current_dir(&self.shop)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
             .stdin(Stdio::null())
             .output()
             .unwrap();

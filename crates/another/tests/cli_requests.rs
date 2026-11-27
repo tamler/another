@@ -4,7 +4,12 @@
 //! the CLI's release and cancel paths.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+#[path = "common/cli.rs"]
+mod cli;
+
+use cli::another_cmd;
 
 struct Fx {
     _dir: tempfile::TempDir,
@@ -43,12 +48,9 @@ impl Fx {
 
     /// Exit status and stderr.
     fn code(&self, args: &[&str]) -> (i32, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = another_cmd(&self.home)
             .args(args)
             .current_dir(&self.shop)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .output()
@@ -60,7 +62,7 @@ impl Fx {
     }
 
     fn request(&self) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = another_cmd(&self.home)
             .args([
                 "--json",
                 "send",
@@ -75,8 +77,6 @@ impl Fx {
                 "b",
             ])
             .current_dir(&self.shop)
-            .env("ANOTHER_HOME", &self.home)
-            .env_remove("ANOTHER_AGENT")
             .output()
             .unwrap();
         assert!(out.status.success());

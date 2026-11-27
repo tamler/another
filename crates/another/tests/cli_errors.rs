@@ -2,17 +2,19 @@
 //! the class of failure: 0 success, 1 error, 2 bad arguments, 3 conflict.
 
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use serde_json::Value;
 
+#[path = "common/cli.rs"]
+mod cli;
+
+use cli::another_cmd;
+
 fn another(home: &Path, cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
+    another_cmd(home)
         .args(args)
         .current_dir(cwd)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
         .stdin(Stdio::null())
         .output()
         .expect("run another")
