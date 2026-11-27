@@ -463,6 +463,72 @@ fn cursor_and_grok_specifics() {
 }
 
 #[test]
+fn grok_uses_shared_hook_when_its_wrapper_cannot_run() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "grok"]);
+    let wrapper = env.another_home.join("hooks/another-hook.sh");
+    let fallback = || {
+        let out = env.hook(
+            "session-start",
+            "claude",
+            &json!({ "sessionId": "g1", "workspaceRoot": env.repo }),
+            &[("GROK_HOOK_EVENT", "SessionStart")],
+        );
+        assert!(out.contains("grok@shop"), "{out}");
+    };
+    let mut config = env.read(".grok/hooks/another.json");
+    let start = config["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("SessionStart");
+    env.write(".grok/hooks/another.json", &config);
+    fallback();
+    config["hooks"]["SessionStart"] = start.unwrap();
+    let grok_home = env.home.join("Grok's hook home");
+    std::fs::create_dir(&grok_home).unwrap();
+    let grok_wrapper = grok_home.join("another-hook.sh");
+    std::fs::copy(&wrapper, &grok_wrapper).unwrap();
+    let executable = grok_wrapper.to_string_lossy().replace('\'', r"'\''");
+    config["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+        json!(format!("'{executable}' session-start --client grok"));
+    env.write(".grok/hooks/another.json", &config);
+    assert_eq!(
+        env.hook(
+            "session-start",
+            "claude",
+            &json!({ "sessionId": "g1", "workspaceRoot": env.repo }),
+            &[("GROK_HOOK_EVENT", "SessionStart")],
+        ),
+        ""
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&grok_wrapper, std::fs::Permissions::from_mode(0o600)).unwrap();
+        fallback();
+    }
+    std::fs::remove_file(&grok_wrapper).unwrap();
+    fallback();
+}
+
+#[test]
+fn uninstall_removes_wrapper_when_other_configs_do_not_name_it() {
+    let env = Env::new();
+    env.ok(&["hook", "install", "--client", "claude,codex"]);
+    let wrapper = env.another_home.join("hooks/another-hook.sh");
+    env.ok(&["hook", "uninstall", "--client", "claude"]);
+    assert!(wrapper.is_file());
+    env.write(
+        ".cursor/hooks.json",
+        &json!({"description": "another formerly used another-hook.sh", "hooks": {
+            "sessionStart": [{"command": "'/old/.wyres/hooks/wyres-hook.sh' session-start"}]
+        }}),
+    );
+    env.ok(&["hook", "uninstall", "--client", "codex"]);
+    assert!(!wrapper.exists());
+}
+
+#[test]
 fn hook_run_fails_open() {
     let env = Env::new();
     // Garbage stdin, an explicit unknown agent, and an unwritable home all exit 0.

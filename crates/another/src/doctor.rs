@@ -10,7 +10,7 @@ use std::time::Duration;
 use another_core::{Error, Store};
 use serde::Serialize;
 
-use crate::hooks::{self, Client, HookEnv};
+use crate::hooks::{self, runnable, Client, HookEnv};
 
 /// How long the database may stay locked, and how long `/health` may take.
 const WAIT: Duration = Duration::from_secs(2);
@@ -384,16 +384,18 @@ fn hook_check(another_home: &Path) -> Check {
     let Ok(env) = HookEnv::detect(another_home.to_path_buf()) else {
         return check("hooks", Level::Skip, "HOME is not set");
     };
-    // Each installed client config names the wrapper it runs, by absolute path.
-    let mut installed: Vec<(Client, Vec<PathBuf>)> = Vec::new();
-    for c in Client::ALL {
-        if let Ok(text) = std::fs::read_to_string(c.config_path(&env.home)) {
-            if text.contains(hooks::MARKER) {
-                installed.push((c, wrapper_paths(&text)));
-            }
-        }
-    }
-    let clients: Vec<Client> = installed.iter().map(|(c, _)| *c).collect();
+    let installed: Vec<_> = Client::ALL
+        .into_iter()
+        .flat_map(|client| {
+            client
+                .installed_configs(&env.home)
+                .map(move |(_, config)| (client, config))
+        })
+        .collect();
+    let clients: Vec<Client> = Client::ALL
+        .into_iter()
+        .filter(|c| installed.iter().any(|(client, _)| client == c))
+        .collect();
     let missing: Vec<&str> = Client::ALL
         .into_iter()
         .filter(|c| !clients.contains(c))
@@ -404,7 +406,8 @@ fn hook_check(another_home: &Path) -> Check {
             .fix("another hook install --client claude (or codex, grok, cursor, all)");
     }
     let ours = env.script_path();
-    for (client, paths) in &installed {
+    for (client, config) in &installed {
+        let paths = wrapper_paths(config);
         if let Some(broken) = paths.iter().find(|p| !runnable(p)) {
             return check(
                 "hooks",
@@ -413,6 +416,18 @@ fn hook_check(another_home: &Path) -> Check {
                     "{} runs {}, which is missing or not executable",
                     client.as_str(),
                     broken.display()
+                ),
+            )
+            .fix(format!("another hook install --client {}", client.as_str()));
+        }
+        if config.contains(hooks::LEGACY_MARKER) {
+            return check(
+                "hooks",
+                Level::Warn,
+                format!(
+                    "{} has legacy {} hooks",
+                    client.as_str(),
+                    hooks::LEGACY_MARKER
                 ),
             )
             .fix(format!("another hook install --client {}", client.as_str()));
@@ -447,17 +462,48 @@ fn hook_check(another_home: &Path) -> Check {
 }
 
 /// The wrapper paths a client config runs. The installer writes each command as the
-/// single-quoted absolute path of `another-hook.sh` followed by its arguments.
+/// single-quoted absolute path of the wrapper followed by its arguments.
 fn wrapper_paths(config: &str) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = Vec::new();
-    for (at, _) in config.match_indices(hooks::MARKER) {
-        let end = at + hooks::MARKER.len();
-        let Some(start) = config[..at].rfind(['\'', '"']) else {
-            continue;
+    let mut found = Vec::new();
+    let mut add = |command: &str| {
+        let Some(path) = hooks::command_executable(command) else {
+            return;
         };
-        let path = PathBuf::from(&config[start + 1..end]);
-        if path.is_absolute() && !found.contains(&path) {
+        let Some(text) = path.to_str() else {
+            return;
+        };
+        let windows_absolute = matches!(
+            text.as_bytes(),
+            [b'A'..=b'Z' | b'a'..=b'z', b':', b'\\' | b'/', ..] | [b'\\', b'\\', ..]
+        );
+        let name = if windows_absolute {
+            text.rsplit(['/', '\\']).next()
+        } else {
+            path.file_name().and_then(|name| name.to_str())
+        };
+        if (path.is_absolute() || windows_absolute)
+            && name.is_some_and(|name| hooks::WRAPPER_MARKERS.contains(&name))
+            && !found.contains(&path)
+        {
             found.push(path);
+        }
+    };
+    if let Ok(config) = serde_json::from_str(config) {
+        hooks::configured_commands(&config)
+            .into_iter()
+            .for_each(add);
+    } else {
+        // Read the single-line string assignments used by TOML hook commands.
+        for (key, value) in config.lines().filter_map(|line| line.split_once('=')) {
+            if key.trim() != "command" {
+                continue;
+            }
+            let value = value.trim();
+            if let Some(literal) = value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+                add(literal);
+            } else if let Ok(command) = serde_json::from_str::<String>(value) {
+                add(&command);
+            }
         }
     }
     found
@@ -472,17 +518,6 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 fn names(cs: &[Client]) -> String {
     cs.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")
-}
-
-#[cfg(unix)]
-fn runnable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn runnable(p: &Path) -> bool {
-    p.is_file()
 }
 
 /// Enough for `/health`'s small JSON object.
@@ -1057,6 +1092,40 @@ pub fn render(r: &Report) -> String {
 mod tests {
     use super::*;
     use crate::daemon::{DaemonEnv, DaemonStatus, Manager};
+
+    #[test]
+    fn wrapper_paths_decode_json_escaped_windows_path() {
+        let config =
+            r#"{"command":"'C:\\Users\\Grok'\\''s Hook Home\\another-hook.sh' session-start"}"#;
+        assert_eq!(
+            wrapper_paths(config),
+            [PathBuf::from(r"C:\Users\Grok's Hook Home\another-hook.sh")]
+        );
+    }
+
+    #[test]
+    fn wrapper_paths_read_toml_commands() {
+        let home = if cfg!(windows) {
+            "C:/hook home"
+        } else {
+            "/hook home"
+        };
+        let config = format!(
+            r#"
+[[hooks.SessionStart]]
+command = "'{home}/another-hook.sh' session-start"
+[[hooks.SessionStart]]
+command = '"{home}/wyres-hook.sh" session-start'
+"#
+        );
+        assert_eq!(
+            wrapper_paths(&config),
+            [
+                PathBuf::from(format!("{home}/another-hook.sh")),
+                PathBuf::from(format!("{home}/wyres-hook.sh")),
+            ]
+        );
+    }
 
     #[test]
     fn daemon_check_reads_the_home_from_a_systemd_unit_fixture() {

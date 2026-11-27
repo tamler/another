@@ -34,14 +34,25 @@ use serde_json::{json, Map, Value};
 
 /// Substring that identifies hook entries Another owns inside client configs.
 pub const MARKER: &str = "another-hook.sh";
-/// Hook script and Grok file names used before the project was renamed to Another
-/// (see DECISIONS D35). They are recognised only so `hook install` / `hook uninstall`
-/// replace or remove entries left by development builds; nothing new is written with them.
-const LEGACY_MARKERS: &[&str] = &["wyres-hook.sh"];
+/// Pre-rename wrapper and Grok config names (see DECISIONS D35).
+pub(crate) const LEGACY_MARKER: &str = "wyres-hook.sh";
+pub(crate) const WRAPPER_MARKERS: [&str; 2] = [MARKER, LEGACY_MARKER];
 const LEGACY_GROK_FILE: &str = "wyres.json";
 
 fn mentions_ours(text: &str) -> bool {
-    text.contains(MARKER) || LEGACY_MARKERS.iter().any(|m| text.contains(m))
+    WRAPPER_MARKERS
+        .into_iter()
+        .any(|marker| text.contains(marker))
+}
+
+fn read_ours(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|text| mentions_ours(text))
+}
+
+fn legacy_grok_path(home: &Path) -> PathBuf {
+    home.join(".grok").join("hooks").join(LEGACY_GROK_FILE)
 }
 /// Upper bound on injected digest text.
 pub const MAX_DIGEST_CHARS: usize = 1500;
@@ -85,6 +96,13 @@ impl Client {
             Client::Grok => home.join(".grok").join("hooks").join("another.json"),
             Client::Cursor => home.join(".cursor").join("hooks.json"),
         }
+    }
+
+    /// Configs that reference either Another wrapper, with the current config first.
+    pub(crate) fn installed_configs(self, home: &Path) -> impl Iterator<Item = (PathBuf, String)> {
+        std::iter::once(self.config_path(home))
+            .chain((self == Client::Grok).then(|| legacy_grok_path(home)))
+            .filter_map(|path| read_ours(&path).map(|text| (path, text)))
     }
 
     /// The hook entries Another installs for this client.
@@ -505,7 +523,7 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
                     (ChangeKind::Delete, None)
                 } else {
                     let after = render(&root)?;
-                    if b.trim() == after.trim() || !contains_ours_text(b) {
+                    if b.trim() == after.trim() || !mentions_ours(b) {
                         (ChangeKind::Unchanged, None)
                     } else {
                         (ChangeKind::Update, Some(after))
@@ -520,10 +538,6 @@ fn plan_config(client: Client, env: &HookEnv, install: bool) -> Result<FileChang
         backup: None,
         after,
     })
-}
-
-fn contains_ours_text(text: &str) -> bool {
-    mentions_ours(text)
 }
 
 fn timestamp() -> String {
@@ -633,15 +647,20 @@ pub fn install(
         && Client::ALL
             .iter()
             .filter(|c| !clients.contains(c))
-            .any(|c| {
-                std::fs::read_to_string(c.config_path(&env.home))
-                    .is_ok_and(|t| contains_ours_text(&t))
+            .flat_map(|c| c.installed_configs(&env.home))
+            .any(|(_, config)| {
+                serde_json::from_str::<Value>(&config).is_ok_and(|config| {
+                    configured_commands(&config["hooks"])
+                        .into_iter()
+                        .filter_map(command_executable)
+                        .any(|path| path.file_name().is_some_and(|name| name == MARKER))
+                })
             });
     let script = plan_script(env, install, still_used);
     // A Grok hook file left by a pre-rename build would run alongside the new one.
     if clients.contains(&Client::Grok) {
-        let legacy = env.home.join(".grok").join("hooks").join(LEGACY_GROK_FILE);
-        if std::fs::read_to_string(&legacy).is_ok_and(|t| mentions_ours(&t)) {
+        let legacy = legacy_grok_path(&env.home);
+        if read_ours(&legacy).is_some() {
             changes.push(FileChange {
                 path: legacy.display().to_string(),
                 change: ChangeKind::Delete,
@@ -819,19 +838,128 @@ fn project_root(dir: &Path) -> PathBuf {
     another_core::git_root(dir, true).unwrap_or_else(|| dir.to_path_buf())
 }
 
-/// Grok also executes Claude/Cursor hook files. When the Grok pack is installed, those
-/// copies stand down so each event runs once; otherwise they act on Grok's behalf.
-fn effective_client(client: Client, env: &HookEnv) -> Option<Client> {
+#[cfg(unix)]
+pub(crate) fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn runnable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Read the executable from an installed command, including apostrophes escaped by sh_quote.
+pub(crate) fn command_executable(command: &str) -> Option<PathBuf> {
+    let command = command.trim_start();
+    if let Some(mut rest) = command.strip_prefix('\'') {
+        let mut executable = String::new();
+        while let Some((part, tail)) = rest.split_once('\'') {
+            executable.push_str(part);
+            if let Some(next) = tail.strip_prefix(r"\''") {
+                executable.push('\'');
+                rest = next;
+            } else {
+                return (tail.is_empty() || tail.starts_with(char::is_whitespace))
+                    .then(|| PathBuf::from(executable));
+            }
+        }
+        return None;
+    }
+    if let Some(rest) = command.strip_prefix('"') {
+        let mut executable = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    return chars
+                        .peek()
+                        .is_none_or(|ch| ch.is_whitespace())
+                        .then(|| PathBuf::from(executable));
+                }
+                '\\' if cfg!(unix) && matches!(chars.peek(), Some('\\' | '"' | '$' | '\x60')) => {
+                    executable.push(chars.next()?);
+                }
+                ch => executable.push(ch),
+            }
+        }
+        return None;
+    }
+    command.split_whitespace().next().map(PathBuf::from)
+}
+
+pub(crate) fn configured_commands(config: &Value) -> Vec<&str> {
+    fn collect<'a>(value: &'a Value, commands: &mut Vec<&'a str>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    if key == "command" {
+                        commands.extend(field.as_str());
+                    } else {
+                        collect(field, commands);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, commands);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut commands = Vec::new();
+    collect(config, &mut commands);
+    commands
+}
+
+fn runnable_wrapper(command: &str) -> bool {
+    let Some(path) = command_executable(command) else {
+        return false;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !WRAPPER_MARKERS.contains(&name) {
+        return false;
+    }
+    if path == Path::new(name) {
+        return std::env::var_os("PATH")
+            .is_some_and(|dirs| std::env::split_paths(&dirs).any(|dir| runnable(&dir.join(name))));
+    }
+    runnable(&path)
+}
+
+/// Grok also executes Claude/Cursor hook files. Keep their fallback for any event
+/// whose Grok configuration lacks a runnable wrapper.
+fn effective_client(client: Client, env: &HookEnv, event: HookEvent) -> Option<Client> {
     if client == Client::Grok || std::env::var_os("GROK_HOOK_EVENT").is_none() {
         return Some(client);
     }
-    let grok_pack = std::fs::read_to_string(Client::Grok.config_path(&env.home))
-        .is_ok_and(|t| contains_ours_text(&t));
-    if grok_pack {
-        None
-    } else {
-        Some(Client::Grok)
-    }
+    let grok_runs_event = Client::Grok
+        .specs()
+        .into_iter()
+        .find(|spec| spec.event == event)
+        .is_some_and(|spec| {
+            Client::Grok
+                .installed_configs(&env.home)
+                .any(|(_, config)| {
+                    let Ok(config) = serde_json::from_str::<Value>(&config) else {
+                        return false;
+                    };
+                    config["hooks"][spec.key]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|group| group["hooks"].as_array())
+                        .flatten()
+                        .filter(|hook| hook["type"] == "command")
+                        .filter_map(|hook| hook["command"].as_str())
+                        .any(runnable_wrapper)
+                })
+        });
+    (!grok_runs_event).then_some(Client::Grok)
 }
 
 fn truncate(mut s: String, max: usize) -> String {
@@ -1706,7 +1834,7 @@ pub fn run(
     client: Client,
     input: HookInput,
 ) -> Result<String> {
-    let Some(client) = effective_client(client, env) else {
+    let Some(client) = effective_client(client, env, event) else {
         return Ok(String::new());
     };
     match run_event(store, env, event, client, input) {
