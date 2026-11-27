@@ -1,5 +1,6 @@
 //! Another daemon and CLI: MCP tools over the core store, served on stdio or loopback HTTP.
 
+mod atomic_write;
 pub mod cli;
 pub mod daemon;
 pub mod dashboard;

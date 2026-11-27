@@ -595,6 +595,93 @@ fn install_and_uninstall_preserve_config_permissions() {
     }
 }
 
+#[test]
+fn uninstall_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
+    let env = Env::new();
+    env.write(".claude/settings.json", &json!({ "model": "x" }));
+    env.ok(&["hook", "install", "--client", "claude,grok"]);
+
+    // Plant stale temp siblings across all uninstall paths:
+    // 1. Updated config (.claude/settings.json)
+    // 2. Deleted config (.grok/hooks/another.json)
+    // 3. Deleted wrapper script ($ANOTHER_HOME/hooks/another-hook.sh)
+    // 4. Unchanged/absent config (.codex/hooks.json)
+    let claude_stale = env
+        .home
+        .join(".claude/settings.json.another-tmp.99999.0.deadbeef");
+    let grok_stale = env
+        .home
+        .join(".grok/hooks/another.json.another-tmp.99999.0.deadbeef");
+    let script_stale = env
+        .another_home
+        .join("hooks/another-hook.sh.another-tmp.99999.0.deadbeef");
+    let codex_dir = env.home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let codex_stale = codex_dir.join("hooks.json.another-tmp.99999.0.deadbeef");
+
+    for p in [&claude_stale, &grok_stale, &script_stale, &codex_stale] {
+        std::fs::write(p, "stale").unwrap();
+    }
+
+    // Plant unrelated files that must survive uninstall.
+    let claude_other_tmp = env
+        .home
+        .join(".claude/other.json.another-tmp.99999.0.deadbeef");
+    let claude_unrelated = env.home.join(".claude/keep.txt");
+    let grok_unrelated = env.home.join(".grok/hooks/keep.txt");
+    let script_unrelated = env.another_home.join("hooks/keep.txt");
+    let codex_unrelated = codex_dir.join("config.toml");
+    for p in [
+        &claude_other_tmp,
+        &claude_unrelated,
+        &grok_unrelated,
+        &script_unrelated,
+        &codex_unrelated,
+    ] {
+        std::fs::write(p, "keep").unwrap();
+    }
+
+    #[cfg(unix)]
+    let (victim, stale_link) = {
+        let victim = env.home.join(".grok/hooks/victim.txt");
+        std::fs::write(&victim, "do-not-touch").unwrap();
+        let link = env
+            .home
+            .join(".grok/hooks/another.json.another-tmp.symlink");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        (victim, link)
+    };
+
+    // Dry run must not sweep anything.
+    env.ok(&["hook", "uninstall", "--client", "all", "--dry-run"]);
+    for p in [&claude_stale, &grok_stale, &script_stale, &codex_stale] {
+        assert!(p.exists(), "dry-run must not sweep {}", p.display());
+    }
+
+    env.ok(&["hook", "uninstall", "--client", "all"]);
+    for p in [&claude_stale, &grok_stale, &script_stale, &codex_stale] {
+        assert!(!p.exists(), "uninstall must sweep {}", p.display());
+    }
+    for p in [
+        &claude_other_tmp,
+        &claude_unrelated,
+        &grok_unrelated,
+        &script_unrelated,
+        &codex_unrelated,
+    ] {
+        assert!(p.exists(), "unrelated file must remain: {}", p.display());
+    }
+
+    #[cfg(unix)]
+    {
+        assert!(std::fs::symlink_metadata(&stale_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn new_client_configs_are_private_and_symlinks_survive() {

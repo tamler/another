@@ -557,71 +557,42 @@ fn apply(change: &mut FileChange) -> Result<()> {
 
 /// Atomically replace `path` with `text`, keeping the existing file's permissions (and, on
 /// unix, its owner where allowed). New files are created private (0600). A symlinked config
-/// is written through to its target so dotfile links survive.
+/// is written through to its target so dotfile links survive. Temp names are unique per
+/// write and stale sibling temp files are swept after rename; concurrent installs are not
+/// supported.
 fn write_preserving(path: &Path, text: &str) -> Result<()> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempCleanup(Option<PathBuf>);
-    impl Drop for TempCleanup {
-        fn drop(&mut self) {
-            if let Some(tmp) = self.0.take() {
-                let _ = std::fs::remove_file(tmp);
-            }
-        }
-    }
-
     let path = match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
     let existing = std::fs::metadata(&path).ok();
-    let mut cleanup = TempCleanup(None);
-    let tmp = {
-        let (tmp, mut file) = {
-            let mut attempt = 0u8;
-            loop {
-                let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-                let rand = another_core::crypto::random_hex(4)?;
-                let mut candidate = path.as_os_str().to_os_string();
-                candidate.push(format!(".another-tmp.{}.{seq}.{rand}", std::process::id()));
-                let tmp = PathBuf::from(candidate);
-                let mut opts = std::fs::OpenOptions::new();
-                opts.write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    opts.mode(0o600);
-                }
-                match opts.open(&tmp) {
-                    Ok(file) => break (tmp, file),
-                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt < 15 => {
-                        attempt += 1;
-                    }
-                    Err(err) => return Err(err.into()),
-                }
+    crate::atomic_write::write_file(&path, text.as_bytes(), Some(0o600), |tmp| {
+        if let Some(meta) = &existing {
+            std::fs::set_permissions(tmp, meta.permissions())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                // Only succeeds when allowed (e.g. same owner, or root); otherwise the new file
+                // keeps the current user's ownership, as before.
+                let _ = std::os::unix::fs::chown(tmp, Some(meta.uid()), Some(meta.gid()));
             }
-        };
-        cleanup.0 = Some(tmp.clone());
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        tmp
-    };
-    if let Some(meta) = &existing {
-        std::fs::set_permissions(&tmp, meta.permissions())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            // Only succeeds when allowed (e.g. same owner, or root); otherwise the new file
-            // keeps the current user's ownership, as before.
-            let _ = std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()));
+        }
+        Ok(())
+    })
+}
+
+/// Sweep stale sibling temp files for a hook config or wrapper script on uninstall.
+/// When `path` is a symlink to an existing target, also sweep siblings of the target where
+/// `write_preserving` creates its temp files.
+fn sweep_hook_temps(path: &Path) {
+    crate::atomic_write::sweep_stale_temps(path);
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        if let Ok(resolved) = std::fs::canonicalize(path) {
+            if resolved != path {
+                crate::atomic_write::sweep_stale_temps(&resolved);
+            }
         }
     }
-    std::fs::rename(&tmp, &path)?;
-    cleanup.0 = None;
-    Ok(())
 }
 
 fn plan_script(env: &HookEnv, install: bool, still_used: bool) -> FileChange {
@@ -689,6 +660,9 @@ pub fn install(
     if !dry_run {
         for change in &mut changes {
             apply(change)?;
+            if !install && !matches!(change.change, ChangeKind::Create | ChangeKind::Update) {
+                sweep_hook_temps(Path::new(&change.path));
+            }
         }
         if install {
             #[cfg(unix)]
@@ -2403,6 +2377,8 @@ mod tests {
         }
     }
 
+    // Temp names are unique per write so low-level writers do not collide on temp paths;
+    // concurrent hook installs are not supported.
     #[test]
     fn write_preserving_handles_concurrent_writers() {
         use std::sync::{Arc, Barrier};
@@ -2488,5 +2464,73 @@ mod tests {
             .filter(|name| name.contains("another-tmp"))
             .collect();
         assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_preserving_sweeps_stale_temp_siblings_and_leaves_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        std::fs::write(&target, "{\"seed\":true}\n").unwrap();
+
+        let stale_a = dir
+            .path()
+            .join("settings.json.another-tmp.99999.0.deadbeef");
+        let stale_b = dir.path().join("settings.json.another-tmp.stale");
+        std::fs::write(&stale_a, "crashed-1").unwrap();
+        std::fs::write(&stale_b, "crashed-2").unwrap();
+
+        let other_target_tmp = dir.path().join("other.json.another-tmp.99999.0.deadbeef");
+        let backup = dir.path().join("settings.json.another-backup-20261127");
+        let bare_suffix = dir.path().join("settings.json.another-tmp");
+        let old_ext = dir.path().join("settings.another-tmp");
+        let unrelated = dir.path().join("notes.txt");
+        for p in [
+            &other_target_tmp,
+            &backup,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
+            std::fs::write(p, "keep").unwrap();
+        }
+
+        let stale_dir = dir.path().join("settings.json.another-tmp.dir");
+        std::fs::create_dir(&stale_dir).unwrap();
+
+        #[cfg(unix)]
+        let (victim, stale_link) = {
+            let victim = dir.path().join("victim.txt");
+            std::fs::write(&victim, "do-not-touch").unwrap();
+            let link = dir.path().join("settings.json.another-tmp.link");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            (victim, link)
+        };
+
+        write_preserving(&target, "{\"updated\":true}\n").unwrap();
+
+        assert!(!stale_a.exists(), "stale sibling temp file should be swept");
+        assert!(!stale_b.exists(), "stale sibling temp file should be swept");
+        for p in [
+            &other_target_tmp,
+            &backup,
+            &bare_suffix,
+            &old_ext,
+            &unrelated,
+        ] {
+            assert!(p.exists(), "unrelated file must remain: {}", p.display());
+        }
+        assert!(stale_dir.is_dir(), "directory matching prefix must remain");
+
+        #[cfg(unix)]
+        {
+            assert!(
+                std::fs::symlink_metadata(&stale_link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "symlink matching prefix must not be followed or removed"
+            );
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+        }
     }
 }
