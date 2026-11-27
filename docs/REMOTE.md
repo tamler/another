@@ -320,7 +320,7 @@ A client that is not using MCP can still poll the feed with a bearer token or an
 curl -H "Authorization: Bearer $ANOTHER_TOKEN" "https://another.example.com/activity?since=1h&kinds=mail,request"
 ```
 
-`GET /activity` takes `since` (a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. The kinds are `mail`, `request`, `hold`, `resource`, `session`, `system`, `federation`, `queue` and `sync`; `sync` holds the events a sync skipped as too large to send and their acknowledgements ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)). It never includes message bodies.
+`GET /activity` takes `since` (bare seconds like `3600`, a duration like `30m`, an RFC 3339 time, or an event-id cursor), `limit` and `kinds`. The kinds are `mail`, `request`, `hold`, `resource`, `session`, `system`, `federation`, `queue` and `sync`; `sync` holds the events a sync skipped as too large to send and their acknowledgements ([FEDERATION.md](FEDERATION.md#an-event-that-is-too-large-to-send)). It never includes message bodies.
 
 ## Audit log
 

@@ -16,6 +16,8 @@ Claude Code and Codex cannot see each other without something shared. They can e
 
 `another serve --federation` without `--auth` serves only `/fed/*` and `/health`, even when a proxy rewrites `Host` to loopback. Add `--auth` for token-gated MCP and activity routes; an explicitly enabled dashboard on that federation listener also needs a token. Unauthenticated rejection audits are capped at 32 rows per server store per 60 seconds. Wake subjects and edit-denial hold values use the hook quoting rules. Foreign resource checks use IP literals only and a bounded probe budget; see [federation](docs/FEDERATION.md).
 
+Normal builds expose only signed federation exchange. Library compatibility tests can enable the `another` crate's `test-support` feature to simulate an older unsigned node; workspace tests enable it automatically. Keep that feature off in shipped builds.
+
 ## Why
 
 This is the failure I kept hitting:
@@ -48,9 +50,10 @@ The website source lives in [site/](site/README.md). `sh site/build.sh` checks t
 
 For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and
 `parse_duration`. The duration helper returns seconds and lets the caller choose
-whether to accept bare numbers. CLI durations still accept bare seconds; activity
-`--since` durations still require a suffix (`s`, `m`, `h`, `d` or `w`). Federation
+whether to accept bare numbers. CLI durations, including `--since`, accept bare
+seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
+MCP `since` inputs also accept bare seconds.
 
 ## Quickstart
 
@@ -157,6 +160,10 @@ and the fresh-install, hook-pack and daemon dry-run checks. The forced small-sta
 test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.
 Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
 
+Security hardening: local listener scans match only local resource registrations, and terminal text flattens Unicode line and paragraph separators. On Unix, database files and build records are created owner-only (0600), and normal database opens tighten those existing files too. Federation hub calls refuse redirects, and unknown pairing invites are refused before taking the write transaction.
+
+Hub backups are secret material: they contain the node's private signing key, mail and authentication records. Keep them owner-only and protect every copy. Unauthenticated refusal audits have a deliberate write budget during floods; individual refusals can be omitted after that budget is exhausted.
+
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/another#1 |
@@ -211,7 +218,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 
 | Area | Tools |
 |---|---|
-| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
+| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions; setting both returns `invalid` on local, bearer-token and hosted OAuth MCP) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
 | Work queue | `queue_propose`, `queue_next` (returns `{claimed, refused}`), `queue_update` (`note` / `release` / `handoff` / `done`), `queue_list`. Local callers only; no tool admits, rejects or edits an item ([docs/QUEUE.md](docs/QUEUE.md)) |
@@ -237,7 +244,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Work queue | `another queue propose\|list\|show\|next\|note\|release\|done` for agents; `another queue admit\|reject\|edit` for the owner (`--owner`, at a terminal) or a delegate (key in `$ANOTHER_ADMIT_KEY`); `another queue limit set\|default\|list`, `another queue delegate add\|remove\|list`, `another queue grace [<duration>]`, `another queue list --needs-owner`, `another queue audit` (`next` exits with status 3 when the agent is at its limit; [docs/QUEUE.md](docs/QUEUE.md)) |
 | What needs the owner | `another needs [--brief] [--limit N]` (read-only; exits 1 only when the list cannot be read; [docs/NEEDS.md](docs/NEEDS.md)) |
 | Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
-| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 1h] [--kinds mail,request] [--summary]`, `another stats [--since 48h]`, `another board [--project P] [--since 24h]` (read-only; [docs/BOARD.md](docs/BOARD.md)) |
+| Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 3600] [--kinds mail,request] [--summary]`, `another stats [--since 48h]`, `another board [--project P] [--since 24h]` (`--since` accepts bare seconds; [docs/ACTIVITY.md](docs/ACTIVITY.md), [docs/BOARD.md](docs/BOARD.md)) |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
 | Daemon | `another daemon install\|uninstall\|status\|restart` (launchd, systemd user unit, Task Scheduler), `another serve [--no-wake]`, and `another doctor` to check the whole installation without changing it ([docs/DOCTOR.md](docs/DOCTOR.md)) |
 | Resources | `another resources`, `another resource register`, `another borrow`, `another release`, `another orphans`, `another reap <target> [--confirm]` |
@@ -246,6 +253,8 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Wake and transports | `another wake [--agent X\|--all] [--dry-run]`, `another wake set\|clear\|list\|prune`, `another transport status [--attention]` ([docs/WAKE.md](docs/WAKE.md)) |
 | Dashboard | `another dashboard` (loopback UI), or `GET /ui` on a loopback `another serve` |
 | External commands | `another <name> [args]` runs `another-<name>` from `PATH` when `<name>` is not built in, like git ([docs/PLUGINS.md](docs/PLUGINS.md)) |
+
+`resource register --meta KEY=VALUE` and `send --field KEY=VALUE` trim keys and require nonempty, unique keys. Missing `=`, empty keys and duplicate keys produce a usage error (exit 2). Metadata keys are stored in sorted order rather than argument order. Metadata values retain whitespace and further `=` characters; see [resources](docs/RESOURCES.md).
 
 ## Concepts
 
@@ -259,6 +268,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 ## Safety defaults
 
 - Binds to loopback only, unless you pass `--auth` and `--allow-remote-bind`.
+- Plain unauthenticated `another serve` and `another daemon install` print a warning on stderr: never tunnel or reverse-proxy this local-agent port. It checks no token, and a proxy that rewrites `Host` to loopback lets remote callers read the feed and act as any agent. Use a separate authenticated or federation-only listener for remote access ([docs/REMOTE.md](docs/REMOTE.md)). Federation-only listeners do not print this local-agent exposure warning.
 - The dashboard is loopback-only. An `--auth` server does not serve it unless you pass `--dashboard`, and then it is read-only with message bodies omitted. Its `Host` must still be loopback on the bound port, not a tunnel name. A federation-only listener (`--federation` without `--auth`) never mounts the dashboard, and with both `--federation` and `--auth` an explicitly enabled dashboard also requires a bearer token.
 - Remote tokens and OAuth grants each act as a single agent within project globs. A hosted client is approved on this machine; it is never approved by an HTTP request. Every remote call is audited.
 - Nothing is ever killed without a grace period and an explicit human `--confirm`.
@@ -279,6 +289,8 @@ cargo fmt --all -- --check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.88.
+
+An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the public docs) is documented in [evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays out of default CI, defaults to offline fixture mode (zero spend), and requires explicit live opt-in, an existing durable spend ledger, per-call/run caps, and billing-confirmation flags before making paid API calls.
 
 ## Clean-room
 

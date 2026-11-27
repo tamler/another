@@ -101,10 +101,10 @@ pub enum Since {
 }
 
 impl Since {
-    /// Parse `15m` / `2h` / `1d` / `90s` (relative to `now`), an RFC 3339 time, or an event id.
+    /// Parse bare seconds or `15m` / `2h` / `1d` / `90s` (relative to `now`), an RFC 3339 time, or an event id.
     pub fn parse(raw: &str, now: i64) -> Result<Since> {
         let raw = raw.trim();
-        if let Some(ms) = crate::time::parse_duration(raw, false)
+        if let Some(ms) = crate::time::parse_duration(raw, true)
             .ok()
             .and_then(|secs| secs.checked_mul(1000))
         {
@@ -117,7 +117,7 @@ impl Since {
             return Ok(Since::After(raw.to_ascii_uppercase()));
         }
         Err(Error::Invalid(format!(
-            "invalid since {raw:?}: use a duration like 30m or 2h, an RFC 3339 time, or an event id"
+            "invalid since {raw:?}: use a duration like 3600 (bare seconds), 90m or 2h, an RFC 3339 time, or an event id"
         )))
     }
 }
