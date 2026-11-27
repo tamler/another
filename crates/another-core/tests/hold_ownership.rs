@@ -456,3 +456,110 @@ fn ingest_report_accepts_both_wire_versions() {
         (1, 2, 0)
     );
 }
+
+#[test]
+fn foreign_project_holds_warn_without_blocking_but_local_holds_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let peer = Node::new(dir.path(), "peer");
+    pair(&hub, &peer);
+    hub.agent("alice");
+    hub.agent("bob");
+    peer.agent("carol");
+    let local = hub.project(&dir.path().join("hub"), "shop");
+    let foreign = peer.project(&dir.path().join("peer"), "shop");
+    let acquire = |agent: &str, project: &Project| AcquireHolds {
+        agent: agent.into(), project: project.abs_path.clone(), paths: vec!["file.rs".into()],
+        ttl_seconds: None, exclusive: true, reason: None, repo_wide: false,
+    };
+    assert_eq!(peer.store.acquire_holds(acquire("carol", &foreign)).unwrap().granted.len(), 1);
+    peer.push_to(&hub);
+    let guard = hub.store.guard_edit("alice", &local.abs_path, &["file.rs".into()], "test").unwrap();
+    assert!(guard.conflicts.is_empty());
+    assert_eq!(guard.held.len(), 1);
+    hub.store.release_holds("alice", &[]).unwrap();
+    let own = hub.store.acquire_holds(acquire("alice", &local)).unwrap();
+    assert_eq!(own.granted.len(), 1);
+    assert!(own.conflicts.is_empty());
+    assert!(!own.warnings.is_empty());
+    let blocked = hub.store.acquire_holds(acquire("bob", &local)).unwrap();
+    assert!(blocked.granted.is_empty());
+    assert_eq!(blocked.conflicts.len(), 1);
+    let guard = hub.store.guard_edit("bob", &local.abs_path, &["file.rs".into()], "test").unwrap();
+    assert!(guard.held.is_empty());
+    assert_eq!(guard.conflicts.len(), 1);
+}
+
+#[test]
+fn reacquire_after_unswept_expiry_creates_a_new_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = Node::new(dir.path(), "local");
+    node.agent("alice");
+    let project = node.project(dir.path(), "shop");
+    let first = node.store.guard_edit("alice", &project.abs_path, &["file.rs".into()], "test").unwrap().held[0].hold_id.clone();
+    node.sql().execute("UPDATE holds SET expires_at = ?1 WHERE hold_id = ?2", params![T0-1, first]).unwrap();
+    let guard = node.store.guard_edit("alice", &project.abs_path, &["file.rs".into()], "test").unwrap();
+    assert!(guard.covered.is_empty());
+    let second = &guard.held[0].hold_id;
+    assert_ne!(&first, second);
+    let released: Option<i64> = node.sql().query_row("SELECT released_at FROM holds WHERE hold_id = ?1", [&first], |r| r.get(0)).unwrap();
+    assert_eq!(released, None, "guard did not sweep the lapsed row before adoption");
+    node.sql().execute("UPDATE holds SET expires_at = ?1 WHERE hold_id = ?2", params![T0-1, second]).unwrap();
+    let acquired = node.store.acquire_holds(AcquireHolds {
+        agent: "alice".into(), project: project.abs_path, paths: vec!["file.rs".into()],
+        ttl_seconds: None, exclusive: true, reason: None, repo_wide: false,
+    }).unwrap();
+    assert_eq!(acquired.granted.len(), 1);
+    assert_ne!(acquired.granted[0].hold_id, first);
+    assert_ne!(&acquired.granted[0].hold_id, second);
+    let updated: i64 = node.sql().query_row("SELECT count(*) FROM events WHERE kind = 'hold.updated'", [], |r| r.get(0)).unwrap();
+    assert_eq!(updated, 0);
+}
+
+#[test]
+fn doctor_counts_orphan_holds_with_missing_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = Node::new(dir.path(), "local");
+    let alice = node.agent("alice");
+    let project = node.project(dir.path(), "shop");
+    let sql = node.sql();
+    sql.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    for (id, owner, agent, pid) in [
+        ("missing-agent", node.store.node_id(), "absent-agent", project.project_id.as_str()),
+        ("missing-project", node.store.node_id(), alice.as_str(), "absent-project"),
+        ("missing-node", "absent-node", alice.as_str(), project.project_id.as_str()),
+    ] {
+        sql.execute("INSERT INTO holds (hold_id,node_id,agent_id,project_id,pattern,exclusive,ttl_seconds,created_at,renewed_at,expires_at) VALUES (?1,?2,?3,?4,'file.rs',1,900,?5,?5,?6)", params![id,owner,agent,pid,T0,T0+900000]).unwrap();
+    }
+    let (count, sample) = node.store.inconsistent_holds(5).unwrap();
+    assert_eq!(count, 3);
+    for id in ["missing-agent", "missing-project", "missing-node"] {
+        assert!(sample.iter().any(|line| line.contains(id)), "{sample:?}");
+    }
+    assert_eq!(node.store.inconsistent_holds(1).unwrap().1.len(), 1);
+    assert_eq!(sql.query_row("SELECT count(*) FROM holds", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+}
+
+#[test]
+fn relayed_batch_summary_names_peer_separately_from_event_origins() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Node::new(dir.path(), "hub");
+    let alpha = Node::new(dir.path(), "alpha");
+    let receiver = Node::new(dir.path(), "receiver");
+    pair(&hub, &alpha);
+    pair(&hub, &receiver);
+    let alice = receiver.agent("alice");
+    // The hub does not yet know the receiver's agent, so the signed events pass there
+    // and travel to the receiver, which knows that alpha cannot own that agent.
+    let events: Vec<_> = (0..23).map(|i| alpha.event(&format!("relayed-{i}"), "hold.acquired", json!({"hold_id":format!("hold-{i}"),"agent_id":alice}))).collect();
+    assert_eq!(hub.ingest(&alpha, &events).accepted, 23);
+    let pulled = hub.store.pull_for(receiver.store.node_id(), 0, 500).unwrap();
+    let report = receiver.store.ingest(hub.store.node_id(), &pulled.events, &pulled.nodes).unwrap();
+    assert_eq!(report.hold_refused, 23);
+    let sql = receiver.sql();
+    let agent: String = sql.query_row("SELECT agent FROM audit_log WHERE operation='federation hold ownership' AND outcome='refused' LIMIT 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(agent, format!("node:{}", alpha.store.node_id()));
+    let (agent, detail): (String,String) = sql.query_row("SELECT agent,detail FROM audit_log WHERE operation='federation hold ownership' AND outcome='summary'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(agent, format!("peer:{}", hub.store.node_id()));
+    assert!(detail.contains("received via peer") && detail.contains(hub.store.node_id()) && detail.contains("3 more"), "{detail}");
+}
