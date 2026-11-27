@@ -1,0 +1,27 @@
+name: coordination scenarios
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Fixture accounting tests
+        run: python3 -m unittest discover -s scripts -p test_coordination_eval.py -v
+      - name: Scripted scenarios and offline judges
+        env:
+          ANOTHER_RUN_COORDINATION_EVALS: '1'
+        run: python3 scripts/coordination_eval.py --second-family

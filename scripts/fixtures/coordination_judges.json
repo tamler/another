@@ -1,0 +1,7 @@
+{
+  "openai": {"verdict": true},
+  "anthropic": {"verdict": true},
+  "insufficient_credit": {"error": {"type": "insufficient_credit"}},
+  "billing_error": {"error": {"type": "billing_error"}},
+  "malformed": {"verdict": "pass"}
+}
