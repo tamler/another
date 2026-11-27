@@ -102,11 +102,14 @@ impl Since {
     /// Parse `15m` / `2h` / `1d` / `90s` (relative to `now`), an RFC 3339 time, or an event id.
     pub fn parse(raw: &str, now: i64) -> Result<Since> {
         let raw = raw.trim();
-        if let Some(ms) = parse_duration_ms(raw) {
+        if let Some(ms) = crate::time::parse_duration(raw, false)
+            .ok()
+            .and_then(|secs| secs.checked_mul(1000))
+        {
             return Ok(Since::Time(now - ms));
         }
-        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(raw) {
-            return Ok(Since::Time(t.timestamp_millis()));
+        if let Some(ms) = crate::time::parse_ts(raw) {
+            return Ok(Since::Time(ms));
         }
         if raw.len() == 26 && ulid::Ulid::from_string(raw).is_ok() {
             return Ok(Since::After(raw.to_ascii_uppercase()));
@@ -115,20 +118,6 @@ impl Since {
             "invalid since {raw:?}: use a duration like 30m or 2h, an RFC 3339 time, or an event id"
         )))
     }
-}
-
-fn parse_duration_ms(raw: &str) -> Option<i64> {
-    let (num, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit())?);
-    let n: i64 = num.parse().ok()?;
-    let secs = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        "w" => 604_800,
-        _ => return None,
-    };
-    n.checked_mul(secs * 1000)
 }
 
 #[derive(Debug, Clone, Default)]

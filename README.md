@@ -46,6 +46,12 @@ OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the
 
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
+For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts` and
+`parse_duration`. The duration helper returns seconds and lets the caller choose
+whether to accept bare numbers. CLI durations still accept bare seconds; activity
+`--since` durations still require a suffix (`s`, `m`, `h`, `d` or `w`). Federation
+requests use the store's clock, including a manual clock supplied by a caller.
+
 ## Quickstart
 
 **1. Install** with Rust 1.88 or newer:

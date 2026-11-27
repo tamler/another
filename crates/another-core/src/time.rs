@@ -18,6 +18,32 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Parse a nonnegative duration in seconds, with an `s`, `m`, `h`, `d` or `w`
+/// suffix. Callers choose whether a bare number is also accepted as seconds.
+pub fn parse_duration(raw: &str, allow_bare_seconds: bool) -> Result<i64> {
+    let raw = raw.trim();
+    let split = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
+    let (num, unit) = raw.split_at(split);
+    let n: i64 = num
+        .parse()
+        .map_err(|_| Error::Invalid(format!("invalid duration {raw:?}")))?;
+    let mult = match unit {
+        "" if allow_bare_seconds => 1,
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 604_800,
+        _ => {
+            return Err(Error::Invalid(format!(
+                "invalid duration {raw:?}: use s, m, h, d or w"
+            )))
+        }
+    };
+    n.checked_mul(mult)
+        .ok_or_else(|| Error::Invalid(format!("invalid duration {raw:?}: too large")))
+}
+
 pub fn fmt_ts(ms: i64) -> String {
     DateTime::from_timestamp_millis(ms).map_or_else(
         || ms.to_string(),
