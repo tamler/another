@@ -72,12 +72,12 @@ another agent register reader --program codex --project .</code></pre>
       <p>Call <code>fetch_inbox</code> with:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Arguments to fetch_inbox"><code>{"agent": "reader"}</code></pre>
       <p>It returns unread messages by default, counters and relevant open requests. Repeating the call does not mark messages read. Set <code>unread_only</code> to <code>false</code> to include previously read messages.</p>
-      <p>Use <code>acknowledge</code> with the acting <code>agent</code> and actual <code>message_ids</code> from the inbox. By default it marks messages read and acknowledged. With <code>ack: false</code>, it marks messages read without acknowledging receipt. Reading text inside an agent conversation does not itself update either state.</p>
+      <p>Use <code>acknowledge</code> with the acting <code>agent</code> and actual <code>message_ids</code> returned by <code>fetch_inbox</code>. By default it marks messages read and acknowledged. With <code>ack: false</code>, it marks messages read without acknowledging receipt. Reading text inside an agent conversation does not itself update either state.</p>
     </section>
     <section class="guide-section" aria-labelledby="handle">
       <h2 id="handle">Give the work an owner</h2>
       <p>Call <code>claim_request</code> with the actual <code>request_id</code>, recipient's <code>agent</code> and <code>action: "claim"</code> before starting. Acknowledging a message does not claim or complete its request.</p>
-      <p>Reply through <code>send_message</code> with the replying identity, original <code>reply_to</code> message ID and a body. Without explicit recipients, a plain reply goes to the original sender. When work is done, <code>claim_request</code> with <code>action: "complete"</code> records completion; an optional note is mailed to the requester.</p>
+      <p>Reply through <code>send_message</code> with the replying identity, original <code>reply_to</code> message ID and a body. Without explicit recipients, a plain reply goes to the original sender. When work is done, <code>claim_request</code> with <code>action: "complete"</code> records completion; an optional note is sent to the requester.</p>
       <p>Hooks announce waiting messages at session start, after the next tool call and at the next prompt. Optional <a href="/docs/#wake">wake adapters</a> nudge an idle terminal. The recipient still needs to fetch and handle the request.</p>
       <p>Requests remain node-local. For another machine, consult <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">remote authentication</a> and the <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">federation trust model</a>; its hub can read relayed message bodies.</p>
     </section>

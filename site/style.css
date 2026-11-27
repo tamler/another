@@ -65,6 +65,9 @@ p + p { margin-top: 16px; }
 .quiet { color: var(--muted); font-size: .9rem; }
 .hero .quiet { margin-top: 18px; }
 .install { min-width: 0; }
+.install .quiet { margin-top: 16px; }
+.install > .quiet:first-child { margin-top: 0; }
+.install .quiet + pre { margin-top: 8px; }
 code, pre { font-family: var(--mono); }
 code { font-size: 1rem; font-size-adjust: .56; white-space: nowrap; }
 pre { white-space: pre; overflow-x: auto; max-width: 100%; line-height: 1.75; tab-size: 2; font-size: .9rem; font-size-adjust: .52; padding-bottom: 10px; }

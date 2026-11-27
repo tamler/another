@@ -39,19 +39,27 @@
     <div class="guide-hero"><h1>Your first agent handoff</h1><p class="definition">Send a message between two coding agents working in the same checkout.</p><nav class="guide-nav" aria-label="Guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a> <a href="/guides/">Task guides</a></nav></div>
     <section class="guide-section" aria-labelledby="install-title">
       <h2 id="install-title">1. Install and initialize</h2>
-      <p>With Rust 1.88 or newer installed, run these commands from the repository where your agents will work. Make sure Cargo's bin directory is on your PATH.</p>
+      <p>From the first release, macOS and Linux users can install a verified prebuilt binary with <code>install.sh</code>, run <code>cargo binstall --git https://github.com/tamler/another another</code>, or unpack a macOS, static Linux musl or Windows x86_64 archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp;
+  sh install.sh</code></pre>
+      <p>No GitHub Release is published yet. Install from source today with Rust 1.88 or newer, make sure Cargo's bin directory is on your <code>PATH</code>, then initialize local state from the repository where your agents will work:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install and initialize"><code>cargo install --locked --git https://github.com/tamler/another another
+another --version
 another init</code></pre>
-      <p>The local database lives in <code>~/.another</code>, or the directory set in <code>ANOTHER_HOME</code>. No account or hosted service is needed. See <a href="/docs/install/">installation options</a>, with prerequisites for <a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/">Linux</a> and <a href="/docs/install/windows/">experimental native Windows</a>.</p>
+      <p>The local database lives in <code>~/.another</code>, or the directory set in <code>ANOTHER_HOME</code>. No account or hosted service is needed. See <a href="/docs/install/">installation options</a>, with details for <a href="/docs/install/macos/">macOS</a>, <a href="/docs/install/linux/">Linux</a> and <a href="/docs/install/windows/">experimental native Windows</a>.</p>
     </section>
     <section class="guide-section" aria-labelledby="messages-title">
-      <h2 id="messages-title">2. Send a message</h2>
+      <h2 id="messages-title">2. Send a message and check a hold</h2>
       <p>Try a shell exchange in the same repository. Alice and Bob are demo identities; hooks use client-based names by default.</p>
       <pre class="code-block shell" tabindex="0" aria-label="First message exchange"><code>another agent register alice --program claude --project .
 another agent register bob --program codex --project .
 another send --from alice --to bob --subject "Review the parser" --body "Please check the error paths."
 another inbox --agent bob --unread</code></pre>
       <p>Bob should see Alice's unread message. See <a href="/docs/#messages">recorded fixture output</a>. Names are unique per project; use <code>name@project</code> if a bare name is ambiguous.</p>
+      <p>Test path holds in the same checkout. The second command reports Alice's hold and exits with status 3. Run the release after that expected conflict:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Acquire, check and release a path hold"><code>another hold acquire --agent alice src/parser.rs
+another hold check --agent bob src/parser.rs
+another hold release --agent alice src/parser.rs</code></pre>
       <p>Once the clients are connected, ask an agent to list its messages and reply. Claiming a request gives it an owner. Acknowledging a message records receipt. See the <a href="https://github.com/tamler/another/blob/main/README.md">CLI and MCP reference</a> for those distinct operations.</p>
     </section>
     <section class="guide-section" aria-labelledby="hooks-title">

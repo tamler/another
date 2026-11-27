@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Another: coordinate multiple coding agents</title>
-  <meta name="description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
+  <meta name="description" content="Background messaging so several coding agents can work on one project on one machine without colliding: path holds, messages, activity feed and resources.">
   <link rel="canonical" href="https://toanother.one/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Another: coordinate multiple coding agents">
-  <meta property="og:description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
+  <meta property="og:description" content="Background messaging so several coding agents can work on one project on one machine without colliding: path holds, messages, activity feed and resources.">
   <meta property="og:url" content="https://toanother.one/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Another: coordinate multiple coding agents">
-  <meta name="twitter:description" content="Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines.">
+  <meta name="twitter:description" content="Background messaging so several coding agents can work on one project on one machine without colliding: path holds, messages, activity feed and resources.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. Many agents, one project.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Coordinate coding agents on one project and one machine with path holds, background messages and shared resources. Another also works across machines."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"A background messaging system helping coding agents work in parallel, reduce edit conflicts and share resources, through MCP and a shared CLI.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","author":{"@type":"Organization","name":"The Another Authors"},"name":"Another","url":"https://toanother.one/","description":"Background messaging so several coding agents can work on one project on one machine without colliding: path holds, messages, activity feed and resources."},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","description":"Background messaging so several coding agents can work on one project on one machine without colliding, with path holds, requests, an activity feed and a resource registry.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}},{"@type":"SoftwareSourceCode","@id":"https://toanother.one/#source","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -40,13 +40,16 @@
       <h1 id="headline">Several agents, one project, one machine.</h1>
       <div class="hero-bottom">
         <div>
-          <p class="definition">A background messaging system for coding agents working on the same project, on the same machine, at the same time.</p>
-          <p>Another also works across machines today, through remote peers or a federation hub you host.</p>
-          <p>Run agents in parallel with messages and mid-task notices, path holds that help prevent conflicting edits, and a registry that helps them share model servers and ports. Another does not start the agents or limit their resource use.</p>
+          <p class="definition">Background messaging so several coding agents can work on one project on one machine without colliding.</p>
+          <p>Path holds at the edit, messages and requests between agents, an activity feed and a resource registry. Another does not start your agents or limit their resource use.</p>
+          <p>Optional remote peers and a self-hosted federation hub can connect a second machine when you need one.</p>
         </div>
         <div class="install">
+          <p class="quiet">From the first release (macOS and Linux; verifies SHA-256):</p>
+          <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
+          <p class="quiet">No release is published yet. Install from source today with Rust 1.88 or newer:</p>
           <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
-          <p class="quiet">Rust 1.88 or newer. Apache-2.0. No account, no telemetry.</p>
+          <p class="quiet">From the first release, <code>cargo binstall</code> and archives with SHA-256 sidecars will cover macOS (arm64 and Intel), static Linux musl and Windows x86_64. <a href="/docs/install/">Install options</a>. Apache-2.0. No account, no telemetry.</p>
         </div>
       </div>
     </section>
@@ -62,36 +65,42 @@
     <section class="section" aria-labelledby="fix-title">
       <h2 id="fix-title">What I built for that</h2>
       <p>Path holds, taken at the edit. With the hooks installed and trusted, a Claude Code, Codex or Grok CLI edit to a file another agent holds is stopped with the holder's name, inside one checkout (one working directory). Other worktrees and clones never block each other; <code>another holds</code> still lists them and marks them as <q>other checkout</q>. <code>another hold check</code> exits 3 when globs overlap and grants nothing. Shell edits bypass the hook, Cursor has no edit guard, and the guard fails open when its database is unavailable. Use separate checkouts when you need isolation.</p>
-      <p>Messages have subjects and threads. Agents can acknowledge receipt. A request starts open; claiming it assigns an owner. If it goes stale, someone else can take it.</p>
-      <p>Hooks drop a short digest in at session start, and a one-line notice after the next tool call when a message arrives mid-task. That is why the agents look. A loopback daemon can wake an idle Herdr agent, and optional wake can type into an idle tmux pane. Neither interrupts an agent that is mid-turn. State sits in one SQLite file under <code>~/.another</code> (or <code>$ANOTHER_HOME</code>). A second machine can federate through a hub you host. That hub can read the messages it relays.</p>
+      <p>Messages have subjects and threads. Agents can acknowledge receipt. A request starts open; claiming it assigns an owner. If it goes stale, someone else can take it. An activity feed records sessions, message subjects, requests, holds and resources without message bodies, and the resource registry lets agents find and borrow running servers or ports instead of starting duplicates.</p>
+      <p>Hooks drop a short digest in at session start, and a one-line notice after the next tool call when a message arrives mid-task. That is why the agents look. A loopback daemon can wake an idle Herdr agent, and optional command transports can wake an idle tmux pane. Neither interrupts an agent that is mid-turn. State sits in one SQLite file under <code>~/.another</code> (or <code>$ANOTHER_HOME</code>). A second machine can federate through a hub you host. That hub can read the messages it relays.</p>
       <p>Clients I hook up: Claude Code, Codex, Grok CLI, Cursor. Grok Bot can join as a remote peer with a scoped token. ChatGPT and Claude.ai can join through OAuth against a URL you run, with each grant approved on this machine. Anything else that speaks MCP can use the same tools. <a href="/docs/">The longer docs</a> have the sharp edges.</p>
     </section>
     <section class="section" id="quickstart" aria-labelledby="minute-title">
-      <h2 id="minute-title">About a minute</h2>
+      <h2 id="minute-title">Quickstart</h2>
       <ol class="steps">
         <li>
-          <p>Install from the lockfile, then make a local node. Rust 1.88 or newer.</p>
-          <pre class="shell" tabindex="0" aria-label="Install and init"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another
-another init</code></pre>
+          <p>Install Another. From the first release, macOS and Linux users can run the SHA-256-verifying installer (<code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp; sh install.sh</code>), run <code>cargo binstall --git https://github.com/tamler/another another</code>, or download a macOS, static Linux musl or Windows x86_64 archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. No release is published yet; install with Cargo and Rust 1.88 or newer today:</p>
+          <pre class="shell" tabindex="0" aria-label="Install Another with Cargo"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another
+another <span class="token">--version</span></code></pre>
         </li>
         <li>
-          <p>Preview hooks before they touch your client configs. Drop <code>--dry-run</code> when the plan looks right. Codex still wants you to open <code>/hooks</code> and trust them.</p>
-          <pre class="shell" tabindex="0" aria-label="Preview hooks"><code>another hook install <span class="token">--client</span> all <span class="token">--dry-run</span></code></pre>
+          <p>Make sure Cargo's bin directory is on your <code>PATH</code>. In a test repository or shared checkout, initialize local state, register two agents, send a message and see it:</p>
+          <pre class="shell" tabindex="0" aria-label="Initialize, register two agents, send and read a message"><code>another init
+another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
+another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> .
+another send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Please check the error paths."
+another inbox <span class="token">--agent</span> bob <span class="token">--unread</span></code></pre>
         </li>
         <li>
-          <p>Point each client at the stdio server. One shared loopback daemon is <code>another serve</code>, then <code>http://127.0.0.1:7466/mcp</code>.</p>
+          <p>Check path holds in the same checkout. The second command reports Alice's hold and exits with status 3. Run the release even after that expected conflict:</p>
+          <pre class="shell" tabindex="0" aria-label="Acquire, check and release a path hold"><code>another hold acquire <span class="token">--agent</span> alice src/parser.rs
+another hold check <span class="token">--agent</span> bob src/parser.rs
+another hold release <span class="token">--agent</span> alice src/parser.rs</code></pre>
+        </li>
+        <li>
+          <p>Preview hooks for the clients you use, then drop <code>--dry-run</code> to install. In Codex, open <code>/hooks</code> to review and trust them.</p>
+          <pre class="shell" tabindex="0" aria-label="Preview hooks"><code>another hook install <span class="token">--client</span> claude,codex <span class="token">--dry-run</span></code></pre>
+        </li>
+        <li>
+          <p>Point each client at the stdio MCP server. For a shared loopback daemon instead, run <code>another serve</code> and connect to <code>http://127.0.0.1:7466/mcp</code>.</p>
           <pre class="shell" tabindex="0" aria-label="MCP server config"><code>{ "mcpServers": { "another": { "command": "another", "args": ["serve", "--stdio"] } } }</code></pre>
         </li>
-        <li>
-          <p>Register two agents in this checkout, send a request, and take a hold. <code>--ttl</code> is seconds. Exclusive is the default.</p>
-          <pre class="shell" tabindex="0" aria-label="Send messages and take a hold"><code>another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
-another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> .
-another send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
-another hold acquire <span class="token">--agent</span> alice src/parser.rs <span class="token">--ttl</span> 1800
-another inbox <span class="token">--agent</span> bob</code></pre>
-        </li>
       </ol>
-      <p class="quiet">Full install notes, including checksums once a release exists: <a href="/docs/getting-started/">getting started</a> and <a href="/docs/install/">install</a>.</p>
+      <p class="quiet">State lives in <code>~/.another</code> (or <code>ANOTHER_HOME</code>). See <a href="/docs/getting-started/">getting started</a> and <a href="/docs/install/">install</a> for prebuilt binaries, checksums and per-system setup.</p>
     </section>
     <section class="section" aria-labelledby="proof-title">
       <h2 id="proof-title">A recorded handoff</h2>
@@ -121,19 +130,19 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
         <div class="client"><dt><a href="/guides/avoid-agent-file-conflicts/">Same files</a></dt><dd>Holds, the edit hook that enforces them, the exit status, and what a hold will not do.</dd></div>
         <div class="client"><dt><a href="/guides/claude-code-codex/">Claude Code and Codex</a></dt><dd>Two different programs, one checkout, shared coordination. The guide is the review handoff.</dd></div>
         <div class="client"><dt><a href="/guides/share-model-server/">One model server</a></dt><dd>Register it, borrow it, and do not reap it until a person confirms.</dd></div>
-        <div class="client"><dt><a href="/guides/agents-on-two-machines/">Laptop and a remote box</a></dt><dd>A hub you host. Messages cross. Requests stay on one node.</dd></div>
         <div class="client"><dt><a href="/guides/multiple-claude-code-sessions/">Two Claude Code sessions</a></dt><dd>Same client twice. Give each session its own name or they share one identity.</dd></div>
+        <div class="client"><dt><a href="/guides/agents-on-two-machines/">Laptop and a remote box</a></dt><dd>Optional second machine through a hub you host. Messages cross. Requests stay on one node.</dd></div>
       </dl>
       <p><a href="/guides/">All the task guides</a>, including worktrees, wake, and plain MCP messaging.</p>
     </section>
     <section class="section" aria-labelledby="compare-title">
       <h2 id="compare-title">Other tools I looked at</h2>
-      <p>Some projects are inboxes. Some are a file claim plus a Claude Code hook that can deny the edit. Some start the agents and hand out branches. Another does not start agents. Its edit hook denies a client edit to a held file; an edit from a shell command still gets through.</p>
+      <p>Some projects are plain chat tools for agents. Some are a file claim plus a Claude Code hook that can deny the edit. Some start the agents and hand out branches. Another does not start agents. Its edit hook denies a client edit to a held file; an edit from a shell command still gets through.</p>
       <p>I wrote down what their READMEs actually say, and when I would use something else. <a href="/compare/">Coordination or orchestration</a>. <a href="/compare/alternatives/">When not to use Another</a>, including copy-paste and Claude Code's own agent teams if every session you run is Claude.</p>
     </section>
     <section class="section" aria-labelledby="missing-title">
       <h2 id="missing-title">What is on main, and what is not</h2>
-      <p>OAuth for hosted MCP clients such as ChatGPT and Claude.ai is on main: <code>another serve --auth --public-url</code> or <code>another remote up</code>, and a grant exists only after <code>another oauth approve</code> on this machine. So is the local dashboard: <code>another dashboard</code>, or <code>/ui</code> on a loopback <code>another serve</code>. It stays on that machine. Not there: a pre-commit hold guard, end-to-end message encryption, a packaged release.</p>
+      <p>OAuth for hosted MCP clients such as ChatGPT and Claude.ai is on main: <code>another serve --auth --public-url</code> or <code>another remote up</code>, and a grant exists only after <code>another oauth approve</code> on this machine. So is the local dashboard: <code>another dashboard</code>, or <code>/ui</code> on a loopback <code>another serve</code>. It stays on that machine. Not there yet: a pre-commit hold guard, end-to-end message encryption, a published GitHub Release.</p>
       <p>Milestones 1 through 7, the dashboard, push with edit holds, the single-node work queue, upgrade safety and the pre-tag security fixes are on main. <a href="/changelog/">Changelog and what is next</a>. <a href="/building/">How I run the agents on this repo</a>.</p>
     </section>
     <section class="section" aria-labelledby="objections-title">
@@ -147,8 +156,11 @@ opened request 01M6FMXVS73X1C5HPZKWSC7QZN</span></code></pre>
     <section class="section" aria-labelledby="install-title">
       <h2 id="install-title">Install Another</h2>
       <div class="install closing-install">
+        <p class="quiet">From the first release (macOS and Linux; verifies SHA-256):</p>
+        <pre class="shell" tabindex="0" aria-label="Install a prebuilt binary from the first release"><code>curl <span class="token">-fsSLO</span> <span class="token">https://github.com/tamler/another/releases/latest/download/install.sh</span> &amp;&amp; sh install.sh</code></pre>
+        <p class="quiet">No release is published yet. Install from source today with Rust 1.88 or newer:</p>
         <pre class="shell" tabindex="0" aria-label="Install Another"><code>cargo install <span class="token">--locked</span> <span class="token">--git</span> <span class="token">https://github.com/tamler/another</span> another</code></pre>
-        <p class="quiet">Rust 1.88 or newer.</p>
+        <p class="quiet">Prebuilt archives, <code>cargo binstall</code>, checksums and Windows notes: <a href="/docs/install/">install guide</a>.</p>
       </div>
       <p class="star-link"><a href="https://github.com/tamler/another">Source on GitHub</a></p>
     </section>
