@@ -584,8 +584,14 @@ fn install_and_uninstall_preserve_config_permissions() {
     }
     // No temp files left behind.
     for (rel, _, _) in &fixtures {
-        let tmp = env.home.join(rel).with_extension("another-tmp");
-        assert!(!tmp.exists(), "{}", tmp.display());
+        let parent = env.home.join(rel).parent().unwrap().to_path_buf();
+        let leftovers: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{rel}: {leftovers:?}");
     }
 }
 

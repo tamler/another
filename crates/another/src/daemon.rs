@@ -503,12 +503,48 @@ fn wait_unloaded(target: &str) {
 }
 
 fn write_definition(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempCleanup(Option<PathBuf>);
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            if let Some(tmp) = self.0.take() {
+                let _ = std::fs::remove_file(tmp);
+            }
+        }
+    }
+
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("another-tmp");
-    let _ = std::fs::remove_file(&tmp);
-    std::fs::write(&tmp, bytes)?;
+    let mut cleanup = TempCleanup(None);
+    let tmp = {
+        let (tmp, mut file) = {
+            let mut attempt = 0u8;
+            loop {
+                let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let rand = another_core::crypto::random_hex(4)?;
+                let mut candidate = path.as_os_str().to_os_string();
+                candidate.push(format!(".another-tmp.{}.{seq}.{rand}", std::process::id()));
+                let tmp = PathBuf::from(candidate);
+                let mut opts = std::fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                match opts.open(&tmp) {
+                    Ok(file) => break (tmp, file),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt < 15 => {
+                        attempt += 1;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        };
+        cleanup.0 = Some(tmp.clone());
+        file.write_all(bytes)?;
+        tmp
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -516,6 +552,7 @@ fn write_definition(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
     }
     std::fs::rename(&tmp, path)?;
+    cleanup.0 = None;
     Ok(())
 }
 
@@ -1268,5 +1305,85 @@ mod tests {
         assert!(validate_label("one.toanother.another-test_2").is_ok());
         assert!(validate_label("../evil").is_err());
         assert!(validate_label("").is_err());
+    }
+
+    #[test]
+    fn write_definition_handles_concurrent_writers() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.toanother.another.plist");
+
+        let threads = 8;
+        let iters = 40;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::with_capacity(threads);
+        for t in 0..threads {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let pad = "a".repeat(8192);
+                barrier.wait();
+                let mut errors = Vec::new();
+                for i in 0..iters {
+                    let payload = format!("<plist t=\"{t}\" i=\"{i}\">{pad}</plist>");
+                    if let Err(err) = write_definition(&path, payload.as_bytes()) {
+                        errors.push(format!("t={t} i={i}: {err:#}"));
+                    }
+                }
+                errors
+            }));
+        }
+
+        let mut all_errors = Vec::new();
+        for h in handles {
+            all_errors.extend(h.join().unwrap());
+        }
+        assert!(
+            all_errors.is_empty(),
+            "concurrent write_definition failed ({} errors), first: {}",
+            all_errors.len(),
+            all_errors.first().map(String::as_str).unwrap_or("")
+        );
+
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        assert!(final_text.starts_with("<plist "));
+        assert!(final_text.ends_with("</plist>"));
+        assert!(final_text.contains(&"a".repeat(8192)));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_definition_cleans_up_temp_file_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the target path makes the final rename fail after the temp file is created.
+        let target = dir.path().join("one.toanother.another.plist");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(write_definition(&target, b"<plist/>").is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 }

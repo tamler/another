@@ -559,27 +559,56 @@ fn apply(change: &mut FileChange) -> Result<()> {
 /// unix, its owner where allowed). New files are created private (0600). A symlinked config
 /// is written through to its target so dotfile links survive.
 fn write_preserving(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempCleanup(Option<PathBuf>);
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            if let Some(tmp) = self.0.take() {
+                let _ = std::fs::remove_file(tmp);
+            }
+        }
+    }
+
     let path = match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
     let existing = std::fs::metadata(&path).ok();
-    let tmp = path.with_extension("another-tmp");
-    // A stale temp file would keep its old mode; start from a fresh one.
-    let _ = std::fs::remove_file(&tmp);
-    {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = opts.open(&tmp)?;
+    let mut cleanup = TempCleanup(None);
+    let tmp = {
+        let (tmp, mut file) = {
+            let mut attempt = 0u8;
+            loop {
+                let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let rand = another_core::crypto::random_hex(4)?;
+                let mut candidate = path.as_os_str().to_os_string();
+                candidate.push(format!(".another-tmp.{}.{seq}.{rand}", std::process::id()));
+                let tmp = PathBuf::from(candidate);
+                let mut opts = std::fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                match opts.open(&tmp) {
+                    Ok(file) => break (tmp, file),
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt < 15 => {
+                        attempt += 1;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        };
+        cleanup.0 = Some(tmp.clone());
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-    }
+        tmp
+    };
     if let Some(meta) = &existing {
         std::fs::set_permissions(&tmp, meta.permissions())?;
         #[cfg(unix)]
@@ -591,6 +620,7 @@ fn write_preserving(path: &Path, text: &str) -> Result<()> {
         }
     }
     std::fs::rename(&tmp, &path)?;
+    cleanup.0 = None;
     Ok(())
 }
 
@@ -2371,5 +2401,92 @@ mod tests {
                 _ => assert_eq!(guard.unwrap().matcher, Some(EDIT_TOOLS)),
             }
         }
+    }
+
+    #[test]
+    fn write_preserving_handles_concurrent_writers() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{\"seed\":true}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+
+        let threads = 8;
+        let iters = 40;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::with_capacity(threads);
+        for t in 0..threads {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let pad = "x".repeat(8192);
+                barrier.wait();
+                let mut errors = Vec::new();
+                for i in 0..iters {
+                    let payload = format!(r#"{{"thread":{t},"iter":{i},"pad":"{pad}"}}"#);
+                    if let Err(err) = write_preserving(&path, &payload) {
+                        errors.push(format!("t={t} i={i}: {err:#}"));
+                    }
+                }
+                errors
+            }));
+        }
+
+        let mut all_errors = Vec::new();
+        for h in handles {
+            all_errors.extend(h.join().unwrap());
+        }
+        assert!(
+            all_errors.is_empty(),
+            "concurrent write_preserving failed ({} errors), first: {}",
+            all_errors.len(),
+            all_errors.first().map(String::as_str).unwrap_or("")
+        );
+
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        let parsed: Value = serde_json::from_str(&final_text).unwrap();
+        assert!(parsed["thread"].is_u64());
+        assert!(parsed["iter"].is_u64());
+        assert_eq!(parsed["pad"].as_str().unwrap().len(), 8192);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_preserving_cleans_up_temp_file_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the target path makes the final rename fail after the temp file is created.
+        let target = dir.path().join("settings.json");
+        std::fs::create_dir(&target).unwrap();
+
+        assert!(write_preserving(&target, "{\"a\":1}").is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("another-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 }
