@@ -210,6 +210,42 @@ fn unauthenticated_audit_budget_summarizes_a_sustained_flood_once_per_window() {
 }
 
 #[test]
+fn first_budget_summary_is_due_after_60s_even_when_the_flood_never_pauses() {
+    let (_dir, store, _) = setup();
+    let start = Instant::now();
+    let clock = another_core::UnauthenticatedAuditClock::pin(start);
+    flood_a_store(&store, 40, "steady");
+    assert_eq!(store.audit_log(1000).unwrap().len(), 32);
+    assert!(
+        budget_rows(&store).is_empty(),
+        "a still-open window must not write a summary"
+    );
+
+    // Keep flooding inside the window: recent stays full, so the old
+    // "first summary when recent is empty" rule would never fire.
+    clock.set(start + Duration::from_secs(30));
+    flood_a_store(&store, 5, "still-open");
+    store.flush_unauthenticated_audit_budget().unwrap();
+    assert!(
+        budget_rows(&store).is_empty(),
+        "the first summary is not due before 60s"
+    );
+
+    clock.set(start + Duration::from_secs(60));
+    store.flush_unauthenticated_audit_budget().unwrap();
+    let summaries = budget_rows(&store);
+    assert_eq!(
+        summaries.len(),
+        1,
+        "first summary is due 60s after the first omission, even under a steady flood"
+    );
+    assert_eq!(
+        summaries[0].detail.as_deref(),
+        Some("13 unauthenticated refusals were omitted in the last 60 seconds")
+    );
+}
+
+#[test]
 fn invalid_token_rejection_does_not_wait_for_external_write_lock() {
     let (dir, store, token) = setup();
     let db = Connection::open(dir.path().join("another.db")).unwrap();
