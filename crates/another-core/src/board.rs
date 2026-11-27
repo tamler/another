@@ -417,7 +417,7 @@ impl Store {
             let agents = load_agents(conn, &local)?;
             let agent_ids: HashSet<&str> = agents
                 .iter()
-                .filter(|a| scope.is_none() || a.project_id.as_deref().is_some_and(&in_scope))
+                .filter(|a| scope.is_none() || a.project_id.as_deref().is_some_and(in_scope))
                 .map(|a| a.id.as_str())
                 .collect();
             let only = scope.as_ref().map(|_| &agent_ids);
@@ -653,7 +653,7 @@ fn load_requests(
             truncated = true;
             continue;
         }
-        let owner_shown = owner_id.as_deref().is_none_or(&seen);
+        let owner_shown = owner_id.as_deref().is_none_or(seen);
         let (to_shown, to_hidden): (Vec<_>, Vec<_>) =
             to.into_iter().partition(|(a, _)| seen(a.as_str()));
         out.push(BoardRequest {

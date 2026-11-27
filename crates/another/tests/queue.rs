@@ -1593,8 +1593,7 @@ fn queue_commands_follow_the_upgrade_rules() {
     std::fs::write(
         &record,
         format!(
-            r#"{{"created":{{"version":"0.1.0","build":"release","schema":{},"at":"2026-11-01T00:00:00.000Z"}}}}"#,
-            before_queue
+            r#"{{"created":{{"version":"0.1.0","build":"release","schema":{before_queue},"at":"2026-11-01T00:00:00.000Z"}}}}"#
         ),
     )
     .unwrap();
@@ -1618,7 +1617,7 @@ fn queue_commands_follow_the_upgrade_rules() {
         for needle in [
             "this development build of another",
             "will not migrate the database",
-            &format!("v{} to v{current}", before_queue),
+            &format!("v{before_queue} to v{current}"),
             "--dev-migrate",
         ] {
             assert!(
