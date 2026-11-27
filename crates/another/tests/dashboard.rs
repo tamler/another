@@ -2,22 +2,23 @@
 
 #[path = "common/hosted_ci.rs"]
 mod hosted_ci;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
 
 use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
 use std::process::{Command, Stdio};
 
 use another::dashboard::{resolve_dashboard, DashboardMode};
-use another::serve::{http_router, HttpOptions};
+use another::serve::HttpOptions;
 use another_core::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage, Store};
+use mcp_http::{start_http, TestServer};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 struct Running {
-    base: String,
+    server: TestServer,
     store: Store,
     _dir: tempfile::TempDir,
-    ct: CancellationToken,
 }
 
 async fn serve(opts: HttpOptions) -> Running {
@@ -67,28 +68,16 @@ async fn serve(opts: HttpOptions) -> Running {
             repo_wide: false,
         })
         .unwrap();
-    let ct = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let mut opts = opts;
-    opts.bound_port = addr.port();
-    opts.dashboard_bound = Some(addr);
-    let app = http_router(store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
+    let server = start_http(store.clone(), CancellationToken::new(), |addr, o| {
+        *o = opts;
+        o.bound_port = addr.port();
+        o.dashboard_bound = Some(addr);
+    })
+    .await;
     Running {
-        base: format!("http://{addr}"),
+        server,
         store,
         _dir: dir,
-        ct,
     }
 }
 
@@ -136,7 +125,7 @@ async fn foreign_host_is_refused_on_every_dashboard_route() {
         ..Default::default()
     })
     .await;
-    let authority = srv.base.trim_start_matches("http://");
+    let authority = srv.server.base.trim_start_matches("http://");
     let gets = [
         "/ui",
         "/ui/",
@@ -189,7 +178,7 @@ async fn foreign_host_is_refused_on_every_dashboard_route() {
     )
     .await;
     assert_eq!(disguised, 403);
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 #[tokio::test]
@@ -201,7 +190,11 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     .await;
     let http = client();
 
-    let ui = http.get(format!("{}/ui", srv.base)).send().await.unwrap();
+    let ui = http
+        .get(format!("{}/ui", srv.server.base))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(ui.status(), 200);
     let html = ui.text().await.unwrap();
     assert!(html.contains("From one agent to another"));
@@ -209,14 +202,14 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     assert!(!html.to_lowercase().contains("cdn"));
     assert!(!html.contains("googleapis"));
     let css = http
-        .get(format!("{}/ui/app.css", srv.base))
+        .get(format!("{}/ui/app.css", srv.server.base))
         .send()
         .await
         .unwrap();
     assert_eq!(css.status(), 200);
     assert!(!css.text().await.unwrap().contains("@import"));
     let js = http
-        .get(format!("{}/ui/app.js", srv.base))
+        .get(format!("{}/ui/app.js", srv.server.base))
         .send()
         .await
         .unwrap();
@@ -224,7 +217,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
 
     let health: Value = serde_json::from_str(
         &http
-            .get(format!("{}/health", srv.base))
+            .get(format!("{}/health", srv.server.base))
             .send()
             .await
             .unwrap()
@@ -237,7 +230,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     assert_eq!(health["auth"], false);
 
     let snap_res = http
-        .get(format!("{}/api/dash", srv.base))
+        .get(format!("{}/api/dash", srv.server.base))
         .send()
         .await
         .unwrap();
@@ -259,7 +252,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     let hold_id = snap["holds"][0]["hold_id"].as_str().unwrap();
 
     let activity = http
-        .get(format!("{}/activity", srv.base))
+        .get(format!("{}/activity", srv.server.base))
         .send()
         .await
         .unwrap()
@@ -275,7 +268,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
         &http
             .get(format!(
                 "{}/api/dash/activity?q=SECRET%20BODY&since=1d",
-                srv.base
+                srv.server.base
             ))
             .send()
             .await
@@ -294,7 +287,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     let denied = http
         .post(format!(
             "{}/api/dash/requests/{request_id}/expire",
-            srv.base
+            srv.server.base
         ))
         .header("content-type", "application/json")
         .body(r#"{"confirm":true}"#)
@@ -306,7 +299,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     let cross = http
         .post(format!(
             "{}/api/dash/requests/{request_id}/expire",
-            srv.base
+            srv.server.base
         ))
         .header("content-type", "application/json")
         .header("x-another-confirm", "1")
@@ -321,11 +314,11 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
         &http
             .post(format!(
                 "{}/api/dash/requests/{request_id}/expire",
-                srv.base
+                srv.server.base
             ))
             .header("content-type", "application/json")
             .header("x-another-confirm", "1")
-            .header("origin", &srv.base)
+            .header("origin", &srv.server.base)
             .body(r#"{"confirm":true}"#)
             .send()
             .await
@@ -338,10 +331,13 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     assert_eq!(expired["status"], "stale");
 
     let fresh = http
-        .post(format!("{}/api/dash/holds/{hold_id}/release", srv.base))
+        .post(format!(
+            "{}/api/dash/holds/{hold_id}/release",
+            srv.server.base
+        ))
         .header("content-type", "application/json")
         .header("x-another-confirm", "1")
-        .header("origin", &srv.base)
+        .header("origin", &srv.server.base)
         .body(r#"{"confirm":true}"#)
         .send()
         .await
@@ -353,7 +349,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
     );
 
     let mut stream = http
-        .get(format!("{}/api/dash/stream", srv.base))
+        .get(format!("{}/api/dash/stream", srv.server.base))
         .send()
         .await
         .unwrap();
@@ -369,7 +365,7 @@ async fn local_dashboard_shows_bodies_and_requires_confirm() {
         "{text}"
     );
 
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 }
 
 #[tokio::test]
@@ -389,13 +385,13 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
         .unwrap();
     for path in ["/ui", "/api/dash", "/api/dash/activity", "/api/dash/stream"] {
         let anon = http
-            .get(format!("{}{path}", off.base))
+            .get(format!("{}{path}", off.server.base))
             .send()
             .await
             .unwrap();
         assert_eq!(anon.status(), 401, "{path}");
         let authed = http
-            .get(format!("{}{path}", off.base))
+            .get(format!("{}{path}", off.server.base))
             .header("authorization", format!("Bearer {}", token.secret))
             .send()
             .await
@@ -408,7 +404,7 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
         );
     }
     let post = http
-        .post(format!("{}/api/dash/requests/nope/expire", off.base))
+        .post(format!("{}/api/dash/requests/nope/expire", off.server.base))
         .header("authorization", format!("Bearer {}", token.secret))
         .header("content-type", "application/json")
         .header("x-another-confirm", "1")
@@ -418,14 +414,14 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
         .unwrap();
     assert_eq!(post.status(), 404);
     let activity = http
-        .get(format!("{}/activity", off.base))
+        .get(format!("{}/activity", off.server.base))
         .send()
         .await
         .unwrap();
     assert_eq!(activity.status(), 401, "auth on /activity is unchanged");
     let health: Value = serde_json::from_str(
         &http
-            .get(format!("{}/health", off.base))
+            .get(format!("{}/health", off.server.base))
             .send()
             .await
             .unwrap()
@@ -436,7 +432,7 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
     .unwrap();
     assert_eq!(health["dashboard"], "off");
     assert_eq!(health["auth"], true);
-    off.ct.cancel();
+    off.server.ct.cancel();
 
     let redacted = serve(HttpOptions {
         auth: true,
@@ -445,14 +441,14 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
     })
     .await;
     let ui = http
-        .get(format!("{}/ui", redacted.base))
+        .get(format!("{}/ui", redacted.server.base))
         .send()
         .await
         .unwrap();
     assert_eq!(ui.status(), 200);
     let snap: Value = serde_json::from_str(
         &http
-            .get(format!("{}/api/dash", redacted.base))
+            .get(format!("{}/api/dash", redacted.server.base))
             .send()
             .await
             .unwrap()
@@ -473,7 +469,7 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
         &http
             .get(format!(
                 "{}/api/dash/activity?q=SECRET%20BODY",
-                redacted.base
+                redacted.server.base
             ))
             .send()
             .await
@@ -488,7 +484,7 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
     let act = http
         .post(format!(
             "{}/api/dash/requests/{request_id}/expire",
-            redacted.base
+            redacted.server.base
         ))
         .header("content-type", "application/json")
         .header("x-another-confirm", "1")
@@ -498,14 +494,14 @@ async fn auth_server_hides_the_dashboard_unless_explicit() {
         .unwrap();
     assert_eq!(act.status(), 403);
     assert_eq!(
-        http.get(format!("{}/activity", redacted.base))
+        http.get(format!("{}/activity", redacted.server.base))
             .send()
             .await
             .unwrap()
             .status(),
         401
     );
-    redacted.ct.cancel();
+    redacted.server.ct.cancel();
 }
 
 #[tokio::test]
@@ -518,7 +514,7 @@ async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
         ..Default::default()
     })
     .await;
-    let authority = srv.base.trim_start_matches("http://");
+    let authority = srv.server.base.trim_start_matches("http://");
     let health = raw_status(
         authority,
         "GET /health HTTP/1.1\r\nHost: tunnel.example\r\nConnection: close\r\n\r\n",
@@ -550,7 +546,7 @@ async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
     )
     .await;
     assert_eq!(origin, 403, "the public origin is not a dashboard origin");
-    srv.ct.cancel();
+    srv.server.ct.cancel();
 
     // Actions exist only without `--auth`. The public origin still must not
     // pass, even though the edge guard accepts it for the rest of the server.
@@ -561,7 +557,7 @@ async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
         ..Default::default()
     })
     .await;
-    let local_authority = local.base.trim_start_matches("http://");
+    let local_authority = local.server.base.trim_start_matches("http://");
     let public_origin = raw_status(
         local_authority,
         &format!(
@@ -578,7 +574,7 @@ async fn auth_dashboard_keeps_loopback_host_when_a_tunnel_host_is_allowed() {
     )
     .await;
     assert_eq!(bound_origin, 404, "the exact bound origin is accepted");
-    local.ct.cancel();
+    local.server.ct.cancel();
 }
 
 #[test]
