@@ -418,13 +418,16 @@ pub struct DaemonStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plist: Option<String>,
     pub installed: bool,
-    /// The service manager has it and will start it: loaded by launchd, loaded and enabled
-    /// in the systemd user manager, or registered with Task Scheduler.
+    /// Loaded by launchd for this home, loaded and enabled in the systemd user manager,
+    /// or registered with Task Scheduler.
     pub loaded: bool,
+    /// Why the service or its health response could not be attributed to this home.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// The running process, where the manager reports one (launchd and systemd).
     pub pid: Option<u32>,
     pub bind: Option<String>,
-    /// `GET /health` answered on the bound address.
+    /// `GET /health` answered on the bound address and identified this home's node.
     pub healthy: bool,
     pub log: String,
 }
@@ -1008,10 +1011,17 @@ pub fn restart(env: &DaemonEnv) -> Result<()> {
     Ok(())
 }
 
-fn healthy(bind: &str) -> bool {
+fn healthy(bind: &str, local_node: &str) -> bool {
+    if !bind
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+    {
+        return false;
+    }
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .proxy(None)
+            .max_redirects(0)
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(2)))
             .build(),
@@ -1019,7 +1029,16 @@ fn healthy(bind: &str) -> bool {
     agent
         .get(&format!("http://{bind}/health"))
         .call()
-        .is_ok_and(|r| r.status().is_success())
+        .is_ok_and(|mut r| {
+            r.status().is_success()
+                && r.body_mut()
+                    .with_config()
+                    .limit(16 * 1024)
+                    .read_to_string()
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .is_some_and(|body| body["node_id"].as_str() == Some(local_node))
+        })
 }
 
 /// `loaded` and `pid` from `systemctl --user show --property=...` output.
@@ -1040,8 +1059,59 @@ fn systemd_state(show: &str) -> (bool, Option<u32>) {
 /// Is the service installed, loaded, running and answering?
 pub fn status(env: &DaemonEnv) -> Result<DaemonStatus> {
     let mut s = service(env)?;
-    s.healthy = s.bind.as_deref().is_some_and(healthy);
+    if s.detail.is_none() {
+        if let Some(bind) = &s.bind {
+            match another_core::Store::open_read_only(&env.another_home, Duration::from_secs(2)) {
+                Ok(store) => {
+                    s.healthy = healthy(bind, store.node_id());
+                    if !s.healthy {
+                        s.detail = Some(format!(
+                            "/health on {bind} did not identify this home's node {}",
+                            store.node_id()
+                        ));
+                    }
+                }
+                Err(e) => s.detail = Some(format!("could not read this home's node: {e}")),
+            }
+        }
+    }
     Ok(s)
+}
+
+fn launchd_state(text: &str, home: &Path) -> (bool, Option<u32>, Option<String>) {
+    let recorded_home = text
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| *line != "environment = {")
+        .skip(1)
+        .take_while(|line| *line != "}")
+        .find_map(|line| line.strip_prefix("ANOTHER_HOME => "));
+    let Some(recorded_home) = recorded_home.filter(|h| !h.is_empty()) else {
+        return (
+            false,
+            None,
+            Some("loaded launchd label's ANOTHER_HOME could not be verified".into()),
+        );
+    };
+    let recorded = Path::new(recorded_home);
+    let same_home = match (recorded.canonicalize(), home.canonicalize()) {
+        (Ok(recorded), Ok(home)) => recorded == home,
+        _ => recorded == home,
+    };
+    if !same_home {
+        return (
+            false,
+            None,
+            Some(format!(
+                "loaded launchd label belongs to a different home: {recorded_home:?}"
+            )),
+        );
+    }
+    let pid = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("pid = "))
+        .and_then(|p| p.trim().parse().ok());
+    (true, pid, None)
 }
 
 /// What the service manager and the service's file say, with no network call: `healthy`
@@ -1050,6 +1120,7 @@ pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
     validate_label(&env.label)?;
     let path = env.file_path();
     let installed_text = read_definition(env.manager, &path);
+    let mut detail = None;
     let (loaded, pid) = match env.manager {
         Manager::Launchd => {
             let out = exec(&argv(&[
@@ -1058,11 +1129,13 @@ pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
                 &launchd_target(&uid()?, &env.label),
             ]))?;
             let text = String::from_utf8_lossy(&out.stdout);
-            let pid = text
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("pid = "))
-                .and_then(|p| p.trim().parse().ok());
-            (out.status.success(), pid)
+            if out.status.success() {
+                let (loaded, pid, reason) = launchd_state(&text, &env.another_home);
+                detail = reason;
+                (loaded, pid)
+            } else {
+                (false, None)
+            }
         }
         Manager::Systemd => {
             let unit = env.unit_name();
@@ -1092,6 +1165,7 @@ pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
         plist: macos_plist_key(env),
         installed: installed_text.is_some(),
         loaded,
+        detail,
         pid,
         bind,
         healthy: false,
@@ -1102,6 +1176,105 @@ pub fn service(env: &DaemonEnv) -> Result<DaemonStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn health_fixture(body: &str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = listener.local_addr().unwrap().to_string();
+        let body = body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        (bind, server)
+    }
+
+    #[test]
+    fn health_requires_this_homes_node() {
+        let (bind, server) = health_fixture(r#"{"ok":true,"node_id":"other-node"}"#);
+        let result = healthy(&bind, "this-node");
+        server.join().unwrap();
+        assert!(
+            !result,
+            "a different node must not be healthy for this home"
+        );
+    }
+
+    #[test]
+    fn health_requires_a_matching_node_in_valid_json() {
+        for (body, expected) in [
+            (r#"{"ok":true,"node_id":"this-node"}"#, true),
+            (r#"{"ok":true}"#, false),
+            ("not json", false),
+        ] {
+            let (bind, server) = health_fixture(body);
+            let result = healthy(&bind, "this-node");
+            server.join().unwrap();
+            assert_eq!(result, expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn launchd_status_rejects_another_home() {
+        let text =
+            "job = {\n environment = {\n ANOTHER_HOME => /work/other home\n }\n pid = 4242\n}\n";
+        let (loaded, pid, detail) = launchd_state(text, Path::new("/work/current"));
+        assert!(!loaded, "another home's daemon is not loaded for this home");
+        assert_eq!(pid, None);
+        assert!(detail.unwrap().contains("different home"));
+    }
+
+    #[test]
+    fn launchd_status_accepts_current_home() {
+        let text =
+            "job = {\n environment = {\n ANOTHER_HOME => /work/current home\n }\n pid = 4242\n}\n";
+        assert_eq!(
+            launchd_state(text, Path::new("/work/current home")),
+            (true, Some(4242), None)
+        );
+        assert_eq!(
+            launchd_state(
+                &text.replace(" pid = 4242\n", ""),
+                Path::new("/work/current home")
+            ),
+            (true, None, None)
+        );
+    }
+
+    #[test]
+    fn launchd_status_requires_recorded_home() {
+        let text = "job = {\n default environment = {\n ANOTHER_HOME => /work/current\n }\n environment = {\n PATH => /bin\n }\n pid = 4242\n}\n";
+        let (loaded, pid, detail) = launchd_state(text, Path::new("/work/current"));
+        assert!(!loaded);
+        assert_eq!(pid, None);
+        assert!(detail.unwrap().contains("could not be verified"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launchd_status_resolves_home_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&home).unwrap();
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        let text = format!(
+            "environment = {{\n ANOTHER_HOME => {}\n}}\npid = 4242\n",
+            home.display()
+        );
+        assert_eq!(launchd_state(&text, &alias), (true, Some(4242), None));
+    }
 
     fn env(manager: Manager) -> DaemonEnv {
         DaemonEnv {

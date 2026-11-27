@@ -102,6 +102,10 @@ Besides session start, prompts and session end, the pack adds a hook after each 
 another daemon install
 ```
 
+On macOS, `another daemon status` checks the loaded label's recorded `ANOTHER_HOME`. If it belongs to a different home, status says so and does not report that daemon's PID or health as this home's.
+
+Daemon status reports healthy only when `/health` identifies this home's node. `another doctor` checks the service manager on both macOS and Linux.
+
 **4. Give agents the MCP tools.** Add Another as a stdio MCP server in each client:
 
 ```json

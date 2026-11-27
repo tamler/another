@@ -95,7 +95,7 @@ pub fn run(inputs: &Inputs) -> Report {
     }
     checks.push(hook_check(&inputs.another_home));
 
-    // launchd and the plist only; the one `/health` call is the server check's, and the
+    // Service manager and definition only; the one `/health` call is the server check's, and the
     // daemon row reuses its answer when both name the same address.
     let daemon = daemon_status(&inputs.another_home);
     let bind = inputs
@@ -568,15 +568,15 @@ fn server(bind: &str, local_node: Option<&str>) -> (Check, bool) {
                 Level::Info,
                 format!("nothing answering on {bind}"),
             )
-            .fix("another daemon install (macOS) or run another serve"),
+            .fix("another daemon install or run another serve"),
             false,
         ),
     }
 }
 
 fn daemon_status(another_home: &Path) -> anyhow::Result<crate::daemon::DaemonStatus> {
-    if !cfg!(target_os = "macos") {
-        anyhow::bail!("not macOS");
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        anyhow::bail!("daemon check supports macOS and Linux");
     }
     let env = crate::daemon::DaemonEnv::detect(
         another_home.to_path_buf(),
@@ -605,20 +605,23 @@ fn daemon_check(
     another_home: &Path,
     answered: Option<&str>,
 ) -> Check {
-    if !cfg!(target_os = "macos") {
-        return check("daemon", Level::Skip, "the launchd daemon is macOS only");
-    }
     let s = match status {
         Ok(s) => s,
-        Err(e) => return check("daemon", Level::Skip, format!("could not ask launchd: {e}")),
+        Err(e) => {
+            return check(
+                "daemon",
+                Level::Skip,
+                format!("could not ask service manager: {e}"),
+            )
+        }
     };
     if !s.installed {
         return check("daemon", Level::Info, "not installed")
             .fix("another daemon install, if you want another serve running in the background");
     }
-    // macOS only (`daemon_status`): `file` is the launchd plist.
-    let served = std::fs::read_to_string(&s.file)
-        .ok()
+    let served = (s.manager == crate::daemon::Manager::Launchd)
+        .then(|| std::fs::read_to_string(&s.file).ok())
+        .flatten()
         .as_deref()
         .and_then(plist_home);
     if let Some(served) = served.filter(|h| !same_file(h, another_home)) {
@@ -633,6 +636,9 @@ fn daemon_check(
             ),
         );
     }
+    if let Some(detail) = &s.detail {
+        return check("daemon", Level::Warn, detail.clone());
+    }
     if !s.loaded {
         return check(
             "daemon",
@@ -646,9 +652,12 @@ fn daemon_check(
         return check(
             "daemon",
             Level::Warn,
-            format!("{} loaded{pid}, but its plist names no --bind", s.label),
+            format!(
+                "{} loaded{pid}, but its definition names no --bind",
+                s.label
+            ),
         )
-        .fix("another daemon install (rewrites the plist)");
+        .fix("another daemon install (rewrites the definition)");
     };
     match answered {
         Some(a) if a == bind => {}

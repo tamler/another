@@ -9,6 +9,8 @@
 
 Waking through a transport is a core part of Another, and hooks are the fallback everywhere (D84). Hooks work without the daemon: holds still expire when the next command looks at them, and mail still reaches a session at its next tool call or prompt. Without the daemon an idle agent is not woken, no session is checked, and `another transport status` says so.
 
+On every supported platform, `another daemon status` reports `healthy` only when a successful `/health` response names the same `node_id` as the current home's database, opened read-only. Another node, a missing node id, malformed JSON or an unreadable database reports `healthy no`, with a detail. The check contacts only a numeric loopback address, follows no redirects and reads at most 16 KiB. `another doctor` checks launchd on macOS and the systemd user unit on Linux, reusing its server check's node-verified health answer without another network call.
+
 ## Run it in the background (macOS)
 
 ```bash
@@ -25,6 +27,8 @@ This writes a per-user LaunchAgent, `~/Library/LaunchAgents/one.toanother.anothe
 ```bash
 another daemon status
 ```
+
+Status compares the loaded launchd job's recorded `ANOTHER_HOME` with the current home (`--home` or `ANOTHER_HOME`). A label serving a different home reports `loaded no`, no PID and `healthy no`, with a `detail` explaining that it belongs to a different home. If the job's home cannot be read, the detail says its home could not be verified and status likewise does not attribute it to this home. JSON includes the same `detail` when present. The file and log paths still describe the current home's configuration. Status changes nothing; installing again still replaces the label as described under Upgrading.
 
 ```bash
 another daemon restart
