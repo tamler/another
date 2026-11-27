@@ -336,9 +336,124 @@ pub struct Store {
     inner: Arc<Inner>,
 }
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static EXPIRE_AUDIT_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static AUDIT_BUDGET_NOW: std::cell::Cell<Option<Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// In tests, treat every stored refusal timestamp as outside the 60s window
+/// on the next flush or unauthenticated audit write, so the suppressed-count
+/// path can be exercised without waiting.
+#[cfg(feature = "test-support")]
+pub fn force_unauthenticated_audit_window_elapsed() {
+    EXPIRE_AUDIT_BUDGET.with(|cell| cell.set(true));
+}
+
+/// Pin the unauthenticated audit budget's clock in tests so a 60s window can
+/// close without waiting. Dropping the guard restores wall time.
+#[cfg(feature = "test-support")]
+pub struct UnauthenticatedAuditClock {
+    _private: (),
+}
+
+#[cfg(feature = "test-support")]
+impl UnauthenticatedAuditClock {
+    pub fn pin(now: Instant) -> Self {
+        AUDIT_BUDGET_NOW.with(|cell| cell.set(Some(now)));
+        Self { _private: () }
+    }
+
+    pub fn set(&self, now: Instant) {
+        AUDIT_BUDGET_NOW.with(|cell| cell.set(Some(now)));
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for UnauthenticatedAuditClock {
+    fn drop(&mut self) {
+        AUDIT_BUDGET_NOW.with(|cell| cell.set(None));
+    }
+}
+
+fn take_audit_window_elapsed() -> bool {
+    #[cfg(feature = "test-support")]
+    {
+        EXPIRE_AUDIT_BUDGET.with(|cell| cell.replace(false))
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        false
+    }
+}
+
+fn budget_now() -> Instant {
+    #[cfg(feature = "test-support")]
+    {
+        AUDIT_BUDGET_NOW.with(|cell| cell.get().unwrap_or_else(Instant::now))
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        Instant::now()
+    }
+}
+
+fn expire_unauthenticated_budget(
+    budget: &mut UnauthenticatedAuditBudget,
+    now: Instant,
+    force: bool,
+    window: Duration,
+) {
+    while budget
+        .recent
+        .front()
+        .is_some_and(|at| force || now.duration_since(*at) >= window)
+    {
+        budget.recent.pop_front();
+    }
+}
+
+fn summary_is_due(
+    budget: &UnauthenticatedAuditBudget,
+    now: Instant,
+    force: bool,
+    window: Duration,
+) -> bool {
+    if budget.suppressed == 0 {
+        return false;
+    }
+    if force {
+        return true;
+    }
+    match budget.last_summary {
+        Some(at) => now.duration_since(at) >= window,
+        None => budget
+            .first_suppressed_at
+            .is_some_and(|at| now.duration_since(at) >= window),
+    }
+}
+
+fn audit_budget_detail(omitted: u64) -> String {
+    if omitted == 1 {
+        "1 unauthenticated refusal was omitted in the last 60 seconds".into()
+    } else {
+        format!("{omitted} unauthenticated refusals were omitted in the last 60 seconds")
+    }
+}
+
+/// Shared 32-row / 60s budget for unauthenticated refusal audits, plus a
+/// count of refusals omitted since the last summary.
+struct UnauthenticatedAuditBudget {
+    recent: std::collections::VecDeque<Instant>,
+    suppressed: u64,
+    last_summary: Option<Instant>,
+    first_suppressed_at: Option<Instant>,
+}
+
 struct Inner {
     conn: Mutex<Connection>,
-    unauthenticated_audits: Mutex<std::collections::VecDeque<Instant>>,
+    unauthenticated_audits: Mutex<UnauthenticatedAuditBudget>,
     node_id: String,
     key: ed25519_dalek::SigningKey,
     clock: Clock,
@@ -589,7 +704,12 @@ impl Store {
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
-                unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
+                unauthenticated_audits: Mutex::new(UnauthenticatedAuditBudget {
+                    recent: std::collections::VecDeque::new(),
+                    suppressed: 0,
+                    last_summary: None,
+                    first_suppressed_at: None,
+                }),
                 node_id,
                 key: crate::crypto::decode_secret(&secret)?,
                 clock: Clock::System,
@@ -616,7 +736,12 @@ impl Store {
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
-                unauthenticated_audits: Mutex::new(std::collections::VecDeque::new()),
+                unauthenticated_audits: Mutex::new(UnauthenticatedAuditBudget {
+                    recent: std::collections::VecDeque::new(),
+                    suppressed: 0,
+                    last_summary: None,
+                    first_suppressed_at: None,
+                }),
                 node_id,
                 key,
                 clock,
@@ -689,28 +814,143 @@ impl Store {
 
     /// Record a bounded sample of unauthenticated failures. The budget is shared by Store
     /// clones and uses monotonic time, so callers cannot multiply it with arbitrary sources.
+    /// When 60s have passed since the first omitted refusal (or since the last
+    /// summary), the next audit write flushes one summary of omitted refusals
+    /// (at most one summary per 60s), even if refusals are still arriving. A
+    /// summary write failure restores the omitted count and does not skip a
+    /// refusal that still has a budget slot.
     pub fn record_unauthenticated_audit(&self, entry: crate::tokens::AuditRecord) -> Result<()> {
+        let force = take_audit_window_elapsed();
+        let flush_err = self.flush_unauthenticated_audit_summary(force).err();
+        if self.try_reserve_unauthenticated_audit_slot() {
+            self.write_audit_row(entry)?;
+        }
+        if let Some(err) = flush_err {
+            tracing::warn!(
+                error = %err,
+                "could not write the unauthenticated audit budget summary; omitted count was kept"
+            );
+        }
+        Ok(())
+    }
+
+    /// Flush a due omitted-refusal summary, if any. Called from unauthenticated
+    /// refusals, any other audit write, and tests. Isolated `ANOTHER_HOME` only.
+    pub fn flush_unauthenticated_audit_budget(&self) -> Result<()> {
+        self.flush_unauthenticated_audit_summary(take_audit_window_elapsed())
+    }
+
+    fn flush_unauthenticated_audit_summary(&self, force_elapsed: bool) -> Result<()> {
         const WINDOW: Duration = Duration::from_secs(60);
         const MAX_ROWS: usize = 32;
-        let now = Instant::now();
-        {
-            let mut recent = self
+        let now = budget_now();
+        let reserved = {
+            let mut budget = self
                 .inner
                 .unauthenticated_audits
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            while recent
-                .front()
-                .is_some_and(|at| now.duration_since(*at) >= WINDOW)
-            {
-                recent.pop_front();
-            }
-            if recent.len() >= MAX_ROWS {
+            expire_unauthenticated_budget(&mut budget, now, force_elapsed, WINDOW);
+            if !summary_is_due(&budget, now, force_elapsed, WINDOW) {
                 return Ok(());
             }
-            recent.push_back(now);
+            if budget.recent.len() >= MAX_ROWS {
+                return Ok(());
+            }
+            let omitted = budget.suppressed;
+            let previous_last = budget.last_summary;
+            let previous_first = budget.first_suppressed_at;
+            budget.recent.push_back(now);
+            budget.suppressed = 0;
+            budget.last_summary = Some(now);
+            budget.first_suppressed_at = None;
+            Some((omitted, previous_last, previous_first))
+        };
+        let Some((omitted, previous_last, previous_first)) = reserved else {
+            return Ok(());
+        };
+        tracing::warn!(
+            omitted,
+            max_rows = MAX_ROWS,
+            window_secs = WINDOW.as_secs(),
+            "unauthenticated refusal audit window closed; omitted refusals are summarized"
+        );
+        let row = crate::tokens::AuditRecord {
+            operation: "audit.budget".into(),
+            outcome: "omitted".into(),
+            detail: Some(audit_budget_detail(omitted)),
+            ..Default::default()
+        };
+        match self.write_audit_row(row) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let mut budget = self
+                    .inner
+                    .unauthenticated_audits
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(at) = budget.recent.back() {
+                    if *at == now {
+                        budget.recent.pop_back();
+                    }
+                }
+                budget.suppressed = budget.suppressed.saturating_add(omitted);
+                budget.last_summary = previous_last;
+                if budget.first_suppressed_at.is_none() {
+                    budget.first_suppressed_at = previous_first;
+                }
+                Err(err)
+            }
         }
-        self.record_audit(entry)
+    }
+
+    fn try_reserve_unauthenticated_audit_slot(&self) -> bool {
+        const WINDOW: Duration = Duration::from_secs(60);
+        const MAX_ROWS: usize = 32;
+        let now = budget_now();
+        let mut budget = self
+            .inner
+            .unauthenticated_audits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        expire_unauthenticated_budget(&mut budget, now, false, WINDOW);
+        if budget.recent.len() >= MAX_ROWS {
+            budget.suppressed = budget.suppressed.saturating_add(1);
+            if budget.first_suppressed_at.is_none() {
+                budget.first_suppressed_at = Some(now);
+            }
+            if budget.suppressed == 1 {
+                tracing::warn!(
+                    max_rows = MAX_ROWS,
+                    window_secs = WINDOW.as_secs(),
+                    "unauthenticated refusal audit budget exhausted; further refusals in this window are omitted"
+                );
+            }
+            return false;
+        }
+        budget.recent.push_back(now);
+        true
+    }
+
+    /// Insert one audit_log row. Does not touch the unauthenticated budget.
+    pub(crate) fn write_audit_row(&self, entry: crate::tokens::AuditRecord) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    tx.node_id,
+                    tx.now,
+                    entry.token_id,
+                    entry.agent,
+                    entry.operation,
+                    entry.outcome,
+                    entry.detail,
+                    entry.remote
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Run a read-only closure against the connection.
