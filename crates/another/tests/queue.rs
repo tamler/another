@@ -1506,7 +1506,7 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
     let said = fx.message(&["queue", "reject", &fast[0].0, "--reason", "no"], &keyed);
     assert_eq!(
         said,
-        "security and data-loss items are decided by the owner personally"
+        "only the owner may reject, edit, or release a claim on a security or data-loss item"
     );
     // The same through the library, where no command line stands between.
     let arch = QueueCaller::Agent {
@@ -1533,9 +1533,21 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
         forbidden(fx.store.queue_release(&arch, claimed, back).map(|_| ()));
     }
     assert_eq!(fx.snapshot(), before);
-    // A keyed delegate may admit a security or data-loss item.
+    // A keyed delegate may admit a security or data-loss item, with a reason.
+    let (code, v) = fx.json(&["queue", "admit", &fast[0].0], &keyed);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Pass --reason"),
+        "{v}"
+    );
     for (proposed, _, _) in &fast {
-        let (code, v) = fx.json(&["queue", "admit", proposed], &keyed);
+        let (code, v) = fx.json(
+            &["queue", "admit", proposed, "--reason", "cleared to start"],
+            &keyed,
+        );
         assert_eq!(code, 0, "{v}");
         assert_eq!(v["admitted"]["authority"], "delegate");
     }

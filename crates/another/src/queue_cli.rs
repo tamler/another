@@ -151,6 +151,9 @@ pub enum QueueCmd {
         /// Offer the item to this agent first.
         #[arg(long = "for", value_name = "AGENT")]
         for_agent: Option<String>,
+        /// Required when a keyed delegate admits a security or data-loss item.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Reject a proposed or ready item, with a reason.
     Reject {
@@ -542,12 +545,14 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             done_when,
             priority,
             for_agent,
+            reason,
         } => {
             let input = AdmitItem {
                 scope,
                 done_when,
                 priority: priority.map(Into::into),
                 for_agent,
+                reason,
             };
             input.validate()?;
             let (caller, revision) = admitter(who, || {
@@ -565,6 +570,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
                     &[
                         ("priority", input.priority.map(|p| p.as_str().to_string())),
                         ("for", input.for_agent.clone()),
+                        ("reason", input.reason.clone()),
                     ],
                 );
                 Ok((text, revision))

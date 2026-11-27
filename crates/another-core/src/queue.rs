@@ -60,7 +60,7 @@ const MAX_SESSION_ID_BYTES: usize = 256;
 
 const AUTOMATIC: &str = "(Automatic notice from Another.)";
 const FAST_LANE_IS_THE_OWNERS: &str =
-    "security and data-loss items are decided by the owner personally";
+    "only the owner may reject, edit, or release a claim on a security or data-loss item";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -252,6 +252,8 @@ pub struct AdmitItem {
     pub priority: Option<QueuePriority>,
     /// Reserve the item for this agent: a first offer, not a restriction.
     pub for_agent: Option<String>,
+    /// Required when a keyed delegate admits a security or data-loss item.
+    pub reason: Option<String>,
 }
 
 /// Input for [`Store::queue_edit`].
@@ -984,7 +986,11 @@ impl ProposeItem {
 impl AdmitItem {
     /// Check the texts against the queue's rules, before anything is read or written.
     pub fn validate(&self) -> Result<()> {
-        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())
+        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())?;
+        if let Some(reason) = &self.reason {
+            QueueItem::validate_reason(reason)?;
+        }
+        Ok(())
     }
 }
 
@@ -1031,7 +1037,8 @@ impl ReleaseItem {
 }
 
 impl QueueItem {
-    /// Check an admitter's reason for rejecting an item or releasing a claim.
+    /// Check an admitter's reason for rejecting an item, releasing a claim, or
+    /// admitting a security or data-loss item as a delegate.
     pub fn validate_reason(reason: &str) -> Result<()> {
         check_text("the reason", reason, MAX_REASON_CHARS, true)
     }
@@ -1739,6 +1746,41 @@ impl Store {
             if row.state != QueueState::Proposed {
                 return Err(wrong_state(tx, &row, "only a proposed item is admitted")?);
             }
+            if matches!(authority, Authority::Delegate(_)) && row.kind.is_fast_lane() {
+                let reason = input
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if reason.is_none() {
+                    return Err(Error::Invalid(format!(
+                        "a delegate must give a reason when admitting a {} item. Pass --reason.",
+                        row.kind.flag()
+                    )));
+                }
+                if let Some(scope) = &input.scope {
+                    if row.scope.as_deref() != Some(scope.as_str()) {
+                        return Err(Error::Forbidden(format!(
+                            "a delegate cannot change the scope of a {} item when admitting it; admit it as proposed, or ask the owner",
+                            row.kind.flag()
+                        )));
+                    }
+                }
+                if let Some(done_when) = &input.done_when {
+                    if row.done_condition.as_deref() != Some(done_when.as_str()) {
+                        return Err(Error::Forbidden(format!(
+                            "a delegate cannot change the done condition of a {} item when admitting it; admit it as proposed, or ask the owner",
+                            row.kind.flag()
+                        )));
+                    }
+                }
+                if input.priority == Some(QueuePriority::Normal) {
+                    return Err(Error::Forbidden(format!(
+                        "a delegate cannot lower the priority of a {} item when admitting it",
+                        row.kind.flag()
+                    )));
+                }
+            }
             let missing = |what: &str, flag: &str| {
                 Error::Invalid(format!(
                     "{} cannot be admitted: it has no {what}. Pass {flag}.",
@@ -1786,6 +1828,15 @@ impl Store {
                 "priority": priority.as_str(),
                 "for_agent": for_agent,
             });
+            if let Some(reason) = input
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                extra["reason"] = json!(reason);
+                detail["reason"] = json!(reason);
+            }
             if matches!(authority, Authority::Delegate(_)) && row.kind.is_fast_lane() {
                 extra["kind"] = json!(row.kind.as_str());
                 extra["owner_notice"] = json!("admitted by delegate");
@@ -1937,7 +1988,8 @@ impl Store {
             }
             let kind = input.kind.unwrap_or(row.kind);
             if kind != row.kind && row.state == QueueState::Ready {
-                // A ready fast-lane item always carries the owner's own approval.
+                // Raising a ready item to the fast lane needs the owner's own
+                // admission. If a delegate admitted it, reject it and propose it again.
                 match &authority {
                     Authority::Delegate(_) => {
                         return Err(Error::Forbidden(format!(

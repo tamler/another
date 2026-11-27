@@ -1429,7 +1429,14 @@ fn admitted_by_delegate_is_a_closing_line_and_is_not_counted() {
     let arch = fx.delegate();
     let item = fx.propose("ann", "A leaked token", QueueKind::Security);
     fx.store
-        .queue_admit(&arch, &item.label, AdmitItem::default())
+        .queue_admit(
+            &arch,
+            &item.label,
+            AdmitItem {
+                reason: Some("the leak is real".into()),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let v = fx.json();
     assert_eq!(v["total"], 0, "{v:#}");

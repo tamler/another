@@ -502,19 +502,19 @@ fn the_table_refuses_a_ready_or_claimed_row_without_approval() {
            scope = NULL WHERE seq = ?1 AND ?2 = ?2",
         "a ready row with no scope",
     );
-    // A fast-lane kind on a row a delegate admitted.
+    // A delegate-admitted row may be security or data-loss (D104). The other
+    // approval CHECKs still hold, including delegate authority with no admitted_by.
     let by_delegate = fx.propose("ann", "admitted by the delegate");
     let arch = fx.delegate();
     fx.store
         .queue_admit(&arch, &by_delegate.label, AdmitItem::default())
         .unwrap();
-    let err = db
-        .execute(
-            "UPDATE queue_items SET kind = 'security' WHERE seq = ?1",
-            [by_delegate.seq],
-        )
-        .expect_err("a fast-lane kind on a delegate-admitted row");
-    assert!(err.to_string().contains("CHECK"), "{err}");
+    db.execute(
+        "UPDATE queue_items SET kind = 'security' WHERE seq = ?1",
+        [by_delegate.seq],
+    )
+    .unwrap();
+    assert_eq!(fx.item(&by_delegate.label).kind, QueueKind::Security);
     // The rows the code writes pass: the whole approval at once.
     db.execute(
         "UPDATE queue_items SET state = 'ready', admit_authority = 'owner', admitted_at = 1
@@ -980,6 +980,13 @@ fn break_mail(db: &Connection, marker: &str) {
 
 fn labels(items: &[QueueItem]) -> Vec<&str> {
     items.iter().map(|i| i.label.as_str()).collect()
+}
+
+fn admit_with_reason(reason: &str) -> AdmitItem {
+    AdmitItem {
+        reason: Some(reason.into()),
+        ..Default::default()
+    }
 }
 
 // T10
@@ -1689,7 +1696,7 @@ fn transitions_follow_the_table() {
     assert_eq!(err.code(), "forbidden");
     assert_eq!(
         err.to_string(),
-        "security and data-loss items are decided by the owner personally"
+        "only the owner may reject, edit, or release a claim on a security or data-loss item"
     );
     assert_eq!(
         code(fx.store.queue_reject(&arch, &p.label, "no")),
@@ -2583,10 +2590,23 @@ fn a_delegate_may_admit_a_security_item_and_the_owner_sees_it() {
         ),
         "forbidden"
     );
+    let err = fx
+        .store
+        .queue_admit(&arch, &security.label, AdmitItem::default())
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid");
+    assert_eq!(
+        err.to_string(),
+        "a delegate must give a reason when admitting a security item. Pass --reason."
+    );
     fx.advance(1000);
     let admitted = fx
         .store
-        .queue_admit(&arch, &security.label, AdmitItem::default())
+        .queue_admit(
+            &arch,
+            &security.label,
+            admit_with_reason("the leak is real"),
+        )
         .unwrap();
     assert_eq!(admitted.state, QueueState::Ready);
     assert_eq!(admitted.kind, QueueKind::Security);
@@ -2604,6 +2624,7 @@ fn a_delegate_may_admit_a_security_item_and_the_owner_sees_it() {
     assert_eq!(event.payload["via"], "key");
     assert_eq!(event.payload["kind"], "security");
     assert_eq!(event.payload["owner_notice"], "admitted by delegate");
+    assert_eq!(event.payload["reason"], "the leak is real");
     let history = admitted.history.clone().expect("history");
     let row = history.last().unwrap();
     assert_eq!(row.kind, "queue.admitted");
@@ -2651,11 +2672,12 @@ fn a_delegate_may_admit_a_security_item_and_the_owner_sees_it() {
         .unwrap();
     fx.advance(1000);
     fx.store
-        .queue_admit(&arch, &loss.label, AdmitItem::default())
+        .queue_admit(&arch, &loss.label, admit_with_reason("the rows are gone"))
         .unwrap();
     let event = fx.events("queue.admitted").pop().unwrap();
     assert_eq!(event.payload["kind"], "data_loss");
     assert_eq!(event.payload["owner_notice"], "admitted by delegate");
+    assert_eq!(event.payload["reason"], "the rows are gone");
     let list = fx.store.queue_needs_owner().unwrap();
     assert_eq!(
         labels(&list.admitted_by_delegate.recent),
@@ -2683,6 +2705,144 @@ fn a_delegate_may_admit_a_security_item_and_the_owner_sees_it() {
     let list = fx.store.queue_needs_owner().unwrap();
     assert_eq!(list.admitted_by_delegate.total, 2);
     assert!(!labels(&list.admitted_by_delegate.recent).contains(&by_owner.label.as_str()));
+}
+
+#[test]
+fn a_delegate_cannot_override_scope_done_when_or_priority_when_admitting_a_fast_lane_item() {
+    let fx = Fx::new();
+    let arch = fx.delegate();
+    let item = fx
+        .store
+        .queue_propose(
+            &agent("ann"),
+            ProposeItem {
+                title: "a leak".into(),
+                kind: QueueKind::Security,
+                scope: Some("M1".into()),
+                done_when: Some("the leak is closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let err = fx
+        .store
+        .queue_admit(
+            &arch,
+            &item.label,
+            AdmitItem {
+                reason: Some("ok".into()),
+                scope: Some("M2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "forbidden");
+    assert_eq!(
+        err.to_string(),
+        "a delegate cannot change the scope of a security item when admitting it; admit it as proposed, or ask the owner"
+    );
+    let err = fx
+        .store
+        .queue_admit(
+            &arch,
+            &item.label,
+            AdmitItem {
+                reason: Some("ok".into()),
+                done_when: Some("later".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "forbidden");
+    assert_eq!(
+        err.to_string(),
+        "a delegate cannot change the done condition of a security item when admitting it; admit it as proposed, or ask the owner"
+    );
+    let err = fx
+        .store
+        .queue_admit(
+            &arch,
+            &item.label,
+            AdmitItem {
+                reason: Some("ok".into()),
+                priority: Some(QueuePriority::Normal),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "forbidden");
+    assert_eq!(
+        err.to_string(),
+        "a delegate cannot lower the priority of a security item when admitting it"
+    );
+    assert_eq!(fx.item(&item.label).state, QueueState::Proposed);
+    // --for is allowed: assigning work is not the risk.
+    let admitted = fx
+        .store
+        .queue_admit(
+            &arch,
+            &item.label,
+            AdmitItem {
+                reason: Some("the leak is real".into()),
+                for_agent: Some("cy".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(admitted.state, QueueState::Ready);
+    assert_eq!(admitted.for_agent.as_deref(), Some("cy"));
+    assert_eq!(admitted.scope.as_deref(), Some("M1"));
+    assert_eq!(
+        admitted.done_condition.as_deref(),
+        Some("the leak is closed")
+    );
+    assert_eq!(admitted.priority, QueuePriority::High);
+}
+
+#[test]
+fn a_delegate_may_admit_its_own_security_finding_with_a_reason() {
+    let fx = Fx::new();
+    let arch = fx.delegate();
+    let item = fx
+        .store
+        .queue_propose(
+            &arch,
+            ProposeItem {
+                title: "a leak I found".into(),
+                kind: QueueKind::Security,
+                scope: Some("M1".into()),
+                done_when: Some("the leak is closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let err = fx
+        .store
+        .queue_admit(&arch, &item.label, AdmitItem::default())
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid");
+    assert!(err.to_string().contains("Pass --reason"), "{err}");
+    let admitted = fx
+        .store
+        .queue_admit(
+            &arch,
+            &item.label,
+            admit_with_reason("I found it and it is real"),
+        )
+        .unwrap();
+    assert_eq!(admitted.state, QueueState::Ready);
+    assert!(admitted.admitted.as_ref().unwrap().self_admitted);
+    assert_eq!(
+        fx.events("queue.admitted").pop().unwrap().payload["reason"],
+        "I found it and it is real"
+    );
+    let list = fx.store.queue_needs_owner().unwrap();
+    assert_eq!(labels(&list.self_admitted.recent), [item.label.as_str()]);
+    assert_eq!(list.self_admitted.total, 1);
+    assert_eq!(
+        labels(&list.admitted_by_delegate.recent),
+        [item.label.as_str()]
+    );
 }
 
 /// Every `queue.*` activity line, with a marker in every free-text field: no marker and no
