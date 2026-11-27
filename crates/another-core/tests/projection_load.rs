@@ -200,17 +200,30 @@ fn sync_projections_cost_does_not_grow_with_ended_history() {
         .unwrap();
     let mut rows = Vec::new();
     let mut done = 0;
-    for target in [0usize, 250, 1000, 2500] {
+    for target in [0usize, 100, 300, 600] {
+        // Time per round of the history built since the previous size: each round is
+        // about ten contract calls, so this shows whether a call grows with history.
+        let start = Instant::now();
+        let built = target - done;
         while done < target {
             round(&store, &actor.proof, &actor.actor.name, &project, done);
             done += 1;
         }
+        let per_round = start
+            .elapsed()
+            .checked_div(built.max(1) as u32)
+            .unwrap_or_default();
         let projections = store.right_leases().unwrap().len();
-        rows.push((target, projections, median_write(&store, &project)));
+        rows.push((
+            target,
+            projections,
+            median_write(&store, &project),
+            per_round,
+        ));
     }
-    println!("rounds  ended_leases  median_write");
-    for (rounds, leases, t) in &rows {
-        println!("{rounds:>6}  {leases:>12}  {t:>12.2?}");
+    println!("rounds  leases_total  median_write  per_round_since_last");
+    for (rounds, leases, t, r) in &rows {
+        println!("{rounds:>6}  {leases:>12}  {t:>12.2?}  {r:>12.2?}");
     }
     let (first, last) = (rows[0].2, rows.last().unwrap().2);
     assert!(

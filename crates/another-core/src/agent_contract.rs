@@ -318,10 +318,17 @@ impl Store {
                                 lease.as_ref(),
                             )?)?,
                         };
+                        // The actor's live leases only: ended ones are history, and
+                        // returning them made every call grow with that history.
+                        let now = self.now();
                         let leases: Vec<_> = self
                             .right_leases()?
                             .into_iter()
-                            .filter(|l| l.owner_actor_id == actor.actor_id)
+                            .filter(|l| {
+                                l.owner_actor_id == actor.actor_id
+                                    && l.released_at.is_none()
+                                    && l.expires_at > now
+                            })
                             .collect();
                         Ok(json!({"projection":projection, "leases":leases}))
                     },
