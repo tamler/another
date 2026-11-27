@@ -98,6 +98,8 @@ impl Served {
     }
 }
 
+/// Dropping a `Served` cancels it and shuts its runtime down, blocking the dropping thread for
+/// up to 5 seconds while in-flight requests finish.
 impl Drop for Served {
     fn drop(&mut self) {
         self.shutdown();
