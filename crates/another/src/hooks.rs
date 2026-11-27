@@ -2533,4 +2533,63 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preserving_handles_250_byte_symlink_target() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+
+        let long_name = format!("{}.json", "a".repeat(245));
+        let other_long_name = format!("{}b.json", "a".repeat(244));
+        assert_eq!(long_name.len(), 250);
+        assert_eq!(other_long_name.len(), 250);
+        let real = dotfiles.join(&long_name);
+        std::fs::write(&real, "{\"seed\":true}\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let mut stale_name = crate::atomic_write::temp_prefix(OsStr::new(&long_name));
+        stale_name.push("99999.0.deadbeef");
+        let stale = dotfiles.join(&stale_name);
+
+        let mut other_stale_name = crate::atomic_write::temp_prefix(OsStr::new(&other_long_name));
+        other_stale_name.push("99999.0.deadbeef");
+        let other_stale = dotfiles.join(&other_stale_name);
+
+        let unrelated = dotfiles.join("keep.txt");
+        for p in [&stale, &other_stale, &unrelated] {
+            std::fs::write(p, "keep-or-sweep").unwrap();
+        }
+
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_preserving(&link, "{\"updated\":true}\n").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "{\"updated\":true}\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(
+            !stale.exists(),
+            "stale temp for 250-byte target should be swept"
+        );
+        assert!(
+            other_stale.exists(),
+            "stale temp for distinct 250-byte target must remain"
+        );
+        assert!(unrelated.exists(), "unrelated file must remain");
+    }
 }

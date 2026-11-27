@@ -723,6 +723,109 @@ fn new_client_configs_are_private_and_symlinks_survive() {
     assert_eq!(mode(&real), 0o600);
 }
 
+#[cfg(unix)]
+#[test]
+fn symlink_target_near_name_max_installs_and_uninstalls() {
+    let env = Env::new();
+    let dotfiles = env.home.join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+
+    // 250-byte basename: valid on NAME_MAX=255 filesystems, but appending a full suffix
+    // verbatim exceeds NAME_MAX.
+    let long_name = format!("{}.json", "a".repeat(245));
+    let sibling_long_name = format!("{}b.json", "a".repeat(244));
+    assert_eq!(long_name.len(), 250);
+    assert_eq!(sibling_long_name.len(), 250);
+    let real = dotfiles.join(&long_name);
+    std::fs::write(&real, "{\"theme\": \"dark\"}").unwrap();
+    set_mode(&real, 0o600);
+
+    let target_hash = &another_core::crypto::sha256_hex(long_name.as_bytes())[..16];
+    let sibling_hash = &another_core::crypto::sha256_hex(sibling_long_name.as_bytes())[..16];
+    let stale_prefix = format!("{}.{target_hash}.another-tmp.", &long_name[..60]);
+    let sibling_stale = dotfiles.join(format!(
+        "{}.{sibling_hash}.another-tmp.99999.0.deadbeef",
+        &sibling_long_name[..60]
+    ));
+    let unrelated = dotfiles.join("keep.txt");
+    let victim = dotfiles.join("victim.txt");
+    let stale_link = dotfiles.join(format!("{stale_prefix}symlink"));
+    std::fs::write(&sibling_stale, "other-target-stale").unwrap();
+    std::fs::write(&unrelated, "keep").unwrap();
+    std::fs::write(&victim, "do-not-touch").unwrap();
+    std::os::unix::fs::symlink(&victim, &stale_link).unwrap();
+
+    std::fs::create_dir_all(env.home.join(".claude")).unwrap();
+    let link = env.home.join(".claude/settings.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let stale_install = dotfiles.join(format!("{stale_prefix}99999.0.deadbeef"));
+    std::fs::write(&stale_install, "crashed-before-install").unwrap();
+
+    env.ok(&["hook", "install", "--client", "claude"]);
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+    assert_eq!(v["theme"], "dark");
+    assert_eq!(ours(&v), installed(".claude/settings.json"));
+    assert_eq!(mode(&real), 0o600);
+    assert!(
+        !stale_install.exists(),
+        "install must sweep stale temp for 250-byte symlink target"
+    );
+    assert!(
+        sibling_stale.exists(),
+        "stale temp for distinct 250-byte target must remain"
+    );
+    assert!(
+        unrelated.exists(),
+        "unrelated file must remain after install"
+    );
+
+    let stale_uninstall = dotfiles.join(format!("{stale_prefix}88888.1.cafebabe"));
+    std::fs::write(&stale_uninstall, "crashed-before-uninstall").unwrap();
+
+    env.ok(&["hook", "uninstall", "--client", "claude"]);
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+    assert_eq!(v["theme"], "dark");
+    assert_eq!(ours(&v), 0);
+    assert_eq!(mode(&real), 0o600);
+    assert!(
+        !stale_uninstall.exists(),
+        "uninstall must sweep stale temp for 250-byte symlink target"
+    );
+
+    // A second uninstall hits the unchanged path (`sweep_hook_temps`) and must also sweep
+    // stale temps next to the canonical 250-byte target.
+    let stale_unchanged = dotfiles.join(format!("{stale_prefix}77777.2.facefeed"));
+    std::fs::write(&stale_unchanged, "crashed-on-unchanged").unwrap();
+    env.ok(&["hook", "uninstall", "--client", "claude"]);
+    assert!(
+        !stale_unchanged.exists(),
+        "unchanged uninstall must sweep stale temp for 250-byte symlink target"
+    );
+
+    assert!(
+        sibling_stale.exists(),
+        "stale temp for distinct 250-byte target must remain after uninstall"
+    );
+    assert!(
+        unrelated.exists(),
+        "unrelated file must remain after uninstall"
+    );
+    assert!(std::fs::symlink_metadata(&stale_link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+}
+
 /// Hook entries written by development builds from before the rename (DECISIONS D35).
 fn legacy_command(event: &str, client: &str) -> String {
     format!("'/old/.wyres/hooks/wyres-hook.sh' {event} --client {client}")

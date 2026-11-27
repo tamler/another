@@ -1437,4 +1437,52 @@ mod tests {
         assert!(other.exists(), "sibling for another target must remain");
         assert!(keep.exists(), "unrelated file must remain");
     }
+
+    #[test]
+    fn write_definition_handles_250_byte_target_name() {
+        use std::ffi::OsStr;
+
+        let dir = tempfile::tempdir().unwrap();
+        let long_name = format!("{}.service", "d".repeat(242));
+        let other_long_name = format!("{}e.service", "d".repeat(241));
+        assert_eq!(long_name.len(), 250);
+        assert_eq!(other_long_name.len(), 250);
+        let target = dir.path().join(&long_name);
+
+        let mut stale_name = crate::atomic_write::temp_prefix(OsStr::new(&long_name));
+        stale_name.push("99999.0.deadbeef");
+        let stale = dir.path().join(&stale_name);
+
+        let mut other_stale_name = crate::atomic_write::temp_prefix(OsStr::new(&other_long_name));
+        other_stale_name.push("99999.0.deadbeef");
+        let other_stale = dir.path().join(&other_stale_name);
+
+        let unrelated = dir.path().join("keep.txt");
+        for p in [&stale, &other_stale, &unrelated] {
+            std::fs::write(p, "data").unwrap();
+        }
+
+        write_definition(&target, b"[Unit]\nDescription=another\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "[Unit]\nDescription=another\n"
+        );
+        assert!(
+            !stale.exists(),
+            "stale temp for 250-byte target should be swept"
+        );
+        assert!(
+            other_stale.exists(),
+            "stale temp for distinct 250-byte target must remain"
+        );
+        assert!(unrelated.exists(), "unrelated file must remain");
+
+        // Uninstall (`remove`) also sweeps stale temps for 250-byte names without touching others.
+        std::fs::write(&stale, "crashed-again").unwrap();
+        remove(&target, true).unwrap();
+        assert!(!target.exists());
+        assert!(!stale.exists(), "remove must sweep 250-byte stale temp");
+        assert!(other_stale.exists(), "distinct 250-byte temp must remain");
+        assert!(unrelated.exists(), "unrelated file must remain");
+    }
 }

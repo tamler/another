@@ -1,10 +1,18 @@
 //! Atomic file replacement using unique sibling temp files and stale temp cleanup.
 //!
-//! Temp names are unique per write (`<target>.another-tmp.<pid>.<seq>.<rand>`) so writes do
-//! not reuse a fixed path, and stale sibling temp files left behind by a crash are swept on
-//! write and uninstall. Concurrent installs are not supported.
+//! Temp names are unique per write and bounded to fit comfortably within `NAME_MAX` (255
+//! bytes) even when the target file name is near the filesystem limit:
+//! - Short target names (`<= 80` bytes): `<target>.another-tmp.<pid>.<seq>.<rand>`
+//! - Longer UTF-8 target names: `<truncated>.<hash16>.another-tmp.<pid>.<seq>.<rand>`
+//!   (truncated on a UTF-8 char boundary, disambiguated by 16 hex chars of SHA-256 of the
+//!   full target name)
+//! - Longer non-UTF-8 target names: `.another-tmp.<hash16>.<pid>.<seq>.<rand>`
+//!
+//! Stale sibling temp files left behind by a crash are swept on write and uninstall using the
+//! same target-specific prefix. Concurrent installs are not supported.
 
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +21,18 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use anyhow::{bail, Result};
 
 const TEMP_MARKER: &str = ".another-tmp.";
+/// Maximum target file name byte length kept verbatim before `.another-tmp.<pid>.<seq>.<rand>`.
+///
+/// The unique suffix `.another-tmp.<pid>.<seq>.<rand>` is at most 53 ASCII bytes
+/// (`13 + 10 + 1 + 20 + 1 + 8`), so `80 + 53 = 133 <= 255` (`NAME_MAX` on Linux/macOS/NTFS
+/// and also below eCryptfs's 143-byte limit).
+const MAX_INLINE_NAME_BYTES: usize = 80;
+/// Maximum bytes kept from a long UTF-8 target name before `.<hash16>.another-tmp.`.
+///
+/// `60 + 1 + 16 + 53 = 130 <= 255`.
+const MAX_TRUNCATED_NAME_BYTES: usize = 60;
+/// Hex characters taken from the SHA-256 of the full target file name when shortening.
+const HASH_HEX_LEN: usize = 16;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -25,6 +45,34 @@ fn parent_dir(path: &Path) -> &Path {
     match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
+    }
+}
+
+fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// Deterministic same-directory temp file prefix for `target_name`, bounded so that
+/// `<prefix><pid>.<seq>.<rand>` always fits within `NAME_MAX`.
+pub(crate) fn temp_prefix(target_name: &OsStr) -> OsString {
+    let encoded = target_name.as_encoded_bytes();
+    if encoded.len() <= MAX_INLINE_NAME_BYTES {
+        let mut prefix = target_name.to_os_string();
+        prefix.push(TEMP_MARKER);
+        return prefix;
+    }
+
+    let digest = another_core::crypto::sha256_hex(encoded);
+    let hash = &digest[..HASH_HEX_LEN];
+    if let Some(utf8) = target_name.to_str() {
+        let base = &utf8[..floor_char_boundary(utf8, MAX_TRUNCATED_NAME_BYTES)];
+        OsString::from(format!("{base}.{hash}{TEMP_MARKER}"))
+    } else {
+        OsString::from(format!("{TEMP_MARKER}{hash}."))
     }
 }
 
@@ -46,9 +94,10 @@ impl Drop for TempGuard {
 
 /// Atomically replace `path` with `bytes`: create a unique sibling temp file, write and
 /// `sync_all` it, close the handle, run `prepare_tmp` on the temp path, rename it over
-/// `path`, and sweep stale sibling temp files matching `<target file name>.another-tmp.*`.
+/// `path`, and sweep stale sibling temp files matching [`temp_prefix`] for `path`.
 ///
-/// Temp names are unique per write; concurrent installs are not supported.
+/// Temp names are unique per write and bounded within `NAME_MAX`; concurrent installs are not
+/// supported.
 pub(crate) fn write_file<F>(
     path: &Path,
     bytes: &[u8],
@@ -62,14 +111,15 @@ where
         bail!("target path has no file name: {}", path.display());
     };
     let parent = parent_dir(path);
+    let prefix = temp_prefix(target_name);
 
     let (mut guard, file) = {
         let mut attempt = 0u8;
         loop {
             let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
             let rand = another_core::crypto::random_hex(4)?;
-            let mut name = target_name.to_os_string();
-            name.push(format!("{TEMP_MARKER}{}.{seq}.{rand}", std::process::id()));
+            let mut name = prefix.clone();
+            name.push(format!("{}.{seq}.{rand}", std::process::id()));
             let tmp = parent.join(&name);
 
             if !in_flight().insert(tmp.clone()) {
@@ -128,7 +178,7 @@ where
     Ok(())
 }
 
-/// Remove stale sibling temp files matching `<target file name>.another-tmp.*` in the same
+/// Remove stale sibling temp files matching [`temp_prefix`] for `target` in the same
 /// directory as `target`.
 ///
 /// Only regular files are removed: symlinks and directories are skipped without following
@@ -142,8 +192,7 @@ pub(crate) fn sweep_stale_temps(target: &Path) {
         return;
     };
 
-    let mut prefix = target_name.to_os_string();
-    prefix.push(TEMP_MARKER);
+    let prefix = temp_prefix(target_name);
     let prefix_bytes = prefix.as_encoded_bytes();
 
     for entry in entries {
@@ -168,6 +217,9 @@ pub(crate) fn sweep_stale_temps(target: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Worst-case length of `<pid>.<seq>.<rand>`: 10 + 1 + 20 + 1 + 8 = 40 ASCII bytes.
+    const MAX_UNIQUE_SUFFIX_BYTES: usize = 40;
 
     #[test]
     fn sweep_ignores_missing_parent_directory() {
@@ -194,5 +246,125 @@ mod tests {
         assert!(empty_suffix.exists());
         assert!(no_dot.exists());
         assert!(other.exists());
+    }
+
+    #[test]
+    fn temp_prefix_bounds_long_ascii_multibyte_and_non_utf8_names() {
+        // Short names stay verbatim.
+        assert_eq!(
+            temp_prefix(OsStr::new("settings.json")),
+            OsString::from("settings.json.another-tmp.")
+        );
+
+        // 250-byte and 255-byte ASCII targets stay well within NAME_MAX (255).
+        let long_a = format!("{}.json", "a".repeat(245));
+        let long_b = format!("{}b.json", "a".repeat(244));
+        let max_255 = format!("{}.json", "z".repeat(250));
+        assert_eq!(long_a.len(), 250);
+        assert_eq!(long_b.len(), 250);
+        assert_eq!(max_255.len(), 255);
+
+        let prefix_a = temp_prefix(OsStr::new(&long_a));
+        let prefix_b = temp_prefix(OsStr::new(&long_b));
+        let prefix_255 = temp_prefix(OsStr::new(&max_255));
+        for p in [&prefix_a, &prefix_b, &prefix_255] {
+            let len = p.as_encoded_bytes().len() + MAX_UNIQUE_SUFFIX_BYTES;
+            assert!(
+                len <= 255,
+                "temp filename could exceed NAME_MAX: {len} bytes ({p:?})"
+            );
+            assert!(p.to_string_lossy().contains("another-tmp"));
+        }
+        assert_ne!(
+            prefix_a, prefix_b,
+            "distinct long targets sharing a prefix must get distinct temp prefixes"
+        );
+
+        // Multibyte UTF-8 where byte 60 falls inside a 3-byte char (`1 + 19*3 = 58`, char spans 58..61).
+        let multibyte = format!("x{}", "あ".repeat(83));
+        assert_eq!(multibyte.len(), 250);
+        assert!(!multibyte.is_char_boundary(MAX_TRUNCATED_NAME_BYTES));
+        let prefix_mb = temp_prefix(OsStr::new(&multibyte));
+        let prefix_mb_str = prefix_mb
+            .to_str()
+            .expect("UTF-8 target must produce UTF-8 prefix");
+        assert!(prefix_mb_str.len() + MAX_UNIQUE_SUFFIX_BYTES <= 255);
+        assert!(prefix_mb_str.ends_with(TEMP_MARKER));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = vec![0xffu8; 250];
+            let prefix_raw = temp_prefix(OsStr::from_bytes(&raw));
+            assert!(prefix_raw.as_encoded_bytes().len() + MAX_UNIQUE_SUFFIX_BYTES <= 255);
+            assert!(prefix_raw.to_string_lossy().contains("another-tmp"));
+        }
+    }
+
+    #[test]
+    fn write_file_and_sweep_handle_250_byte_target_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_name = format!("{}.json", "a".repeat(245));
+        let sibling_name = format!("{}b.json", "a".repeat(244));
+        assert_eq!(target_name.len(), 250);
+        assert_eq!(sibling_name.len(), 250);
+
+        let target = dir.path().join(&target_name);
+        let target_prefix = temp_prefix(OsStr::new(&target_name));
+        let sibling_prefix = temp_prefix(OsStr::new(&sibling_name));
+
+        let mut stale_name = target_prefix.clone();
+        stale_name.push("99999.0.deadbeef");
+        let stale = dir.path().join(&stale_name);
+
+        let mut sibling_stale_name = sibling_prefix;
+        sibling_stale_name.push("99999.0.deadbeef");
+        let sibling_stale = dir.path().join(&sibling_stale_name);
+
+        let empty_suffix = dir.path().join(&target_prefix);
+        let unrelated = dir.path().join("keep.txt");
+        for p in [&stale, &sibling_stale, &empty_suffix, &unrelated] {
+            std::fs::write(p, "data").unwrap();
+        }
+
+        let mut dir_name = target_prefix.clone();
+        dir_name.push("dir");
+        let stale_dir = dir.path().join(&dir_name);
+        std::fs::create_dir(&stale_dir).unwrap();
+
+        #[cfg(unix)]
+        let (victim, stale_link) = {
+            let victim = dir.path().join("victim.txt");
+            std::fs::write(&victim, "do-not-touch").unwrap();
+            let mut link_name = target_prefix;
+            link_name.push("link");
+            let link = dir.path().join(&link_name);
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            (victim, link)
+        };
+
+        write_file(&target, b"{\"ok\":true}\n", Some(0o600), |_| Ok(())).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"ok\":true}\n");
+        assert!(
+            !stale.exists(),
+            "stale temp for 250-byte target should be swept"
+        );
+        assert!(
+            sibling_stale.exists(),
+            "stale temp for distinct 250-byte sibling target must remain"
+        );
+        assert!(empty_suffix.exists(), "empty suffix must remain");
+        assert!(unrelated.exists(), "unrelated file must remain");
+        assert!(stale_dir.is_dir(), "directory matching prefix must remain");
+
+        #[cfg(unix)]
+        {
+            assert!(std::fs::symlink_metadata(&stale_link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do-not-touch");
+        }
     }
 }
