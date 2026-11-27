@@ -1989,7 +1989,8 @@ fn migration_adds_only_queue_tables() {
     assert!(before.iter().all(|(n, _)| !n.starts_with("queue_")));
     drop(db);
 
-    let store = Store::open(&home).unwrap();
+    // The legacy name `ann` below proposes through the explicit repair handle.
+    let store = Store::open(&home).unwrap().unguarded_repair();
     let db = Connection::open(home.join(DB_FILE)).unwrap();
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
