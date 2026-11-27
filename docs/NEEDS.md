@@ -76,6 +76,7 @@ Proposals (1)
 
 4 sessions gone with nothing waiting: another wake prune --dry-run
 1 notice could not be sent in the last 24 hours (Q1 to claude@shop): another queue show Q1
+1 admitted by delegate in the last 7 days (Q8), 1 in all: another queue list --needs-owner
 2 self-admitted in the last 7 days (Q6, Q5), 2 in all: another queue list --self-admitted
 ```
 
@@ -116,7 +117,7 @@ A counted row exists only for a condition that stops agreed work or waits on a d
 
 | Kind | Raised | Cleared | Who |
 |---|---|---|---|
-| `decide_now` | A proposed item of kind `security` or `data-loss` | Admitted or rejected | The owner only |
+| `decide_now` | A proposed item of kind `security` or `data-loss` | Admitted or rejected | The owner, or a keyed delegate (admit needs `--reason`; reject stays the owner) |
 | `proposal` | A proposed item of kind `work` | Admitted or rejected | The owner, or a delegate |
 
 Next: `another queue show`, then `another queue admit` or `another queue reject`. A proposed item is the one way a decision reaches this list: mail and requests are not read.
@@ -190,6 +191,7 @@ These are shown under the list, never counted and never in `--brief`, because no
 |---|---|
 | `<n> sessions gone with nothing waiting` | Sessions the transport no longer lists that hold no bound claim and have no unannounced mail, or whose agent's mail is already a row: closed panes. They are pruned after a day |
 | `<n> notices could not be sent in the last 24 hours` | Queue notices that failed, with up to five named |
+| `<n> admitted by delegate in the last 7 days` | Security and data-loss items a keyed delegate admitted, by number, with the total. This is how those admits appear in the owner list for seven days ([QUEUE.md](QUEUE.md)) |
 | `<n> self-admitted in the last 7 days` | Items a delegate admitted for itself, by number, with the total. This is how a self-admitted item appears in the owner list for seven days ([QUEUE.md](QUEUE.md)) |
 
 ## JSON
@@ -209,7 +211,8 @@ One object. Every key is always present; a value that does not apply is `null` o
   "closing": {
     "gone_idle": 4,
     "failed_notices": [{"item": "Q1", "to": "claude@shop", "at": "2026-11-17T16:05:17.492Z"}],
-    "self_admitted": {"recent": ["Q6", "Q5"], "total": 2}
+    "self_admitted": {"recent": ["Q6", "Q5"], "total": 2},
+    "admitted_by_delegate": {"recent": ["Q8"], "total": 1}
   },
   "rows": [
     {

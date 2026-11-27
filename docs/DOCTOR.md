@@ -110,6 +110,8 @@ An installed build migrates with no flag, whatever its path: `cargo install`, a 
 
 While a build refuses a home, hooks still exit 0 and print nothing, so the session is not interrupted; mail is not announced and edits are not guarded until it is fixed. The reason is written once to `logs/hooks.log` in the home, and any normal command or `another doctor` prints it.
 
+v14 only drops a CHECK on `queue_items` (a keyed delegate may admit a security or data-loss item). The backup taken before that upgrade is a complete v13 home. To roll back, restore that `another-v13-*.db` backup as below and run a v13 build. A v14 build will migrate it again; a v13 build refuses a v14 database.
+
 To restore a backup:
 
 ```sh

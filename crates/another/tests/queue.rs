@@ -1238,14 +1238,18 @@ async fn cli_and_mcp_shapes() {
             "quiet_claims",
             "nobody_can_take",
             "failed_notices",
-            "self_admitted"
+            "self_admitted",
+            "admitted_by_delegate"
         ]
     );
     assert_eq!(keys(&v["self_admitted"]), ["recent", "total"]);
+    assert_eq!(keys(&v["admitted_by_delegate"]), ["recent", "total"]);
     assert_eq!(v["awaiting"][0]["label"], "Q2");
     let human = text(&fx.run(&["queue", "list", "--needs-owner"], &[]).stdout);
     assert!(
-        human.contains("Awaiting a decision") && human.contains("Q2"),
+        human.contains("Awaiting a decision")
+            && human.contains("Q2")
+            && human.contains("Admitted by delegate"),
         "{human}"
     );
     let (code, v) = fx.json(&["queue", "audit"], &[]);
@@ -1481,8 +1485,6 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
     refused.push(s(&["queue", "delegate", "remove", "arch"]));
     refused.push(s(&["queue", "grace", "3h"]));
     for (proposed, ready, claimed) in &fast {
-        refused.push(s(&["queue", "admit", proposed]));
-        refused.push(s(&["queue", "admit", proposed, "--priority", "normal"]));
         refused.push(s(&["queue", "reject", proposed, "--reason", "no"]));
         refused.push(s(&["queue", "reject", ready, "--reason", "no"]));
         for target in [proposed, ready] {
@@ -1501,10 +1503,10 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
         assert_eq!(fx.fails(&args, &keyed), (1, "forbidden".into()), "{args:?}");
     }
     assert_eq!(fx.snapshot(), before, "a refused action changes nothing");
-    let said = fx.message(&["queue", "admit", &fast[0].0], &keyed);
+    let said = fx.message(&["queue", "reject", &fast[0].0, "--reason", "no"], &keyed);
     assert_eq!(
         said,
-        "security and data-loss items are decided by the owner personally"
+        "only the owner may reject, edit, or release a claim on a security or data-loss item"
     );
     // The same through the library, where no command line stands between.
     let arch = QueueCaller::Agent {
@@ -1517,12 +1519,7 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
     forbidden(fx.store.queue_delegate_add(&arch, "bob").map(|_| ()));
     forbidden(fx.store.queue_delegate_remove(&arch, "arch").map(|_| ()));
     forbidden(fx.store.queue_set_grace(&arch, 7200).map(|_| ()));
-    for (proposed, ready, claimed) in &fast {
-        forbidden(
-            fx.store
-                .queue_admit(&arch, proposed, AdmitItem::default())
-                .map(|_| ()),
-        );
+    for (_, ready, claimed) in &fast {
         forbidden(fx.store.queue_reject(&arch, ready, "no").map(|_| ()));
         let lower = EditItem {
             kind: Some(QueueKind::Work),
@@ -1536,6 +1533,32 @@ fn a_delegate_key_is_refused_for_every_owner_only_action() {
         forbidden(fx.store.queue_release(&arch, claimed, back).map(|_| ()));
     }
     assert_eq!(fx.snapshot(), before);
+    // A keyed delegate may admit a security or data-loss item, with a reason.
+    let (code, v) = fx.json(&["queue", "admit", &fast[0].0], &keyed);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Pass --reason"),
+        "{v}"
+    );
+    for (proposed, _, _) in &fast {
+        let (code, v) = fx.json(
+            &["queue", "admit", proposed, "--reason", "cleared to start"],
+            &keyed,
+        );
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(v["admitted"]["authority"], "delegate");
+    }
+    let (code, list) = fx.json(&["queue", "list", "--needs-owner"], &keyed);
+    assert_eq!(code, 0, "{list}");
+    assert_eq!(list["admitted_by_delegate"]["total"], 2);
+    let human = text(&fx.run(&["queue", "list", "--needs-owner"], &keyed).stdout);
+    assert!(
+        human.contains("Admitted by delegate") && human.contains(&fast[0].0),
+        "{human}"
+    );
     // The claimer still finishes its own fast-lane item.
     fx.store
         .queue_done(

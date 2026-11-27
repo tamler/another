@@ -9,7 +9,7 @@ CI was passing on every Keep and Owner row at review time, and stale on every on
 - **Keep**: it serves a scope id. It is rebased, independently reviewed, and merged with CI green.
 - **Fold**: a useful piece moves into the named scope item, usually as part of one batch pull request. The original is closed once the batch exists.
 - **Close**: cut, frozen or superseded. The branch stays, so nothing is lost, and a finding behind it becomes a proposed queue item if it still matters.
-- **Owner**: a security or data-loss finding. The scope sends these to the owner personally. The architect's recommendation is given; the owner decides.
+- **Owner**: a security or data-loss finding. The owner or a keyed delegate may admit it; the owner is shown each delegate admit after the fact. The architect's recommendation is given.
 
 Three rules produced most of the answers:
 

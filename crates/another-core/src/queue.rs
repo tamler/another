@@ -60,7 +60,7 @@ const MAX_SESSION_ID_BYTES: usize = 256;
 
 const AUTOMATIC: &str = "(Automatic notice from Another.)";
 const FAST_LANE_IS_THE_OWNERS: &str =
-    "security and data-loss items are decided by the owner personally";
+    "only the owner may reject, edit, or release a claim on a security or data-loss item";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -97,7 +97,7 @@ impl std::str::FromStr for QueueState {
     }
 }
 
-/// What an item is. `Security` and `DataLoss` are the fast lane: only the owner decides them.
+/// What an item is. `Security` and `DataLoss` are the fast lane: a keyed delegate may admit them with a reason; only the owner may reject, edit, or release a claim.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -252,6 +252,8 @@ pub struct AdmitItem {
     pub priority: Option<QueuePriority>,
     /// Reserve the item for this agent: a first offer, not a restriction.
     pub for_agent: Option<String>,
+    /// Required when a keyed delegate admits a security or data-loss item.
+    pub reason: Option<String>,
 }
 
 /// Input for [`Store::queue_edit`].
@@ -566,6 +568,9 @@ pub struct QueueNeedsOwner {
     /// Notices that could not be sent in the last 24 hours.
     pub failed_notices: Vec<FailedNotice>,
     pub self_admitted: SelfAdmitted,
+    /// Security and data-loss items a keyed delegate admitted, so the owner can see
+    /// them after the fact. The last seven days, newest first, and the total at any age.
+    pub admitted_by_delegate: SelfAdmitted,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -981,7 +986,11 @@ impl ProposeItem {
 impl AdmitItem {
     /// Check the texts against the queue's rules, before anything is read or written.
     pub fn validate(&self) -> Result<()> {
-        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())
+        check_scope_and_done(self.scope.as_deref(), self.done_when.as_deref())?;
+        if let Some(reason) = &self.reason {
+            QueueItem::validate_reason(reason)?;
+        }
+        Ok(())
     }
 }
 
@@ -1028,7 +1037,8 @@ impl ReleaseItem {
 }
 
 impl QueueItem {
-    /// Check an admitter's reason for rejecting an item or releasing a claim.
+    /// Check an admitter's reason for rejecting an item, releasing a claim, or
+    /// admitting a security or data-loss item as a delegate.
     pub fn validate_reason(reason: &str) -> Result<()> {
         check_text("the reason", reason, MAX_REASON_CHARS, true)
     }
@@ -1261,7 +1271,9 @@ impl Authority {
         }
     }
 
-    /// A delegate decides `work` items only.
+    /// A delegate may not reject a security or data-loss item, lower its kind, or
+    /// release another agent's claim on one. Admission of those items is allowed: the
+    /// owner is shown them afterwards.
     fn may_decide(&self, kind: QueueKind) -> Result<()> {
         match self {
             Authority::Delegate(_) if kind.is_fast_lane() => {
@@ -1694,8 +1706,10 @@ impl Store {
     }
 
     /// Admit a proposed item: it becomes `ready` with its scope, its done condition and the
-    /// record of who admitted it and when. Only the owner or a delegate may; a security or
-    /// data-loss item is the owner's alone.
+    /// record of who admitted it and when. Only the owner or a delegate may. A delegate
+    /// admit of a security or data-loss item is recorded on the `queue.admitted` event and
+    /// listed under `queue list --needs-owner` as admitted by delegate, so the owner can
+    /// see it after the fact.
     pub fn queue_admit(
         &self,
         caller: &QueueCaller,
@@ -1729,9 +1743,43 @@ impl Store {
             let authority = admitter(tx, tx.node_id, caller)?;
             let row = find_item(tx, tx.node_id, item)?;
             unchanged_since(tx, &row, shown)?;
-            authority.may_decide(row.kind)?;
             if row.state != QueueState::Proposed {
                 return Err(wrong_state(tx, &row, "only a proposed item is admitted")?);
+            }
+            if matches!(authority, Authority::Delegate(_)) && row.kind.is_fast_lane() {
+                let reason = input
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if reason.is_none() {
+                    return Err(Error::Invalid(format!(
+                        "a delegate must give a reason when admitting a {} item. Pass --reason.",
+                        row.kind.flag()
+                    )));
+                }
+                if let Some(scope) = &input.scope {
+                    if row.scope.as_deref() != Some(scope.as_str()) {
+                        return Err(Error::Forbidden(format!(
+                            "a delegate cannot change the scope of a {} item when admitting it; admit it as proposed, or ask the owner",
+                            row.kind.flag()
+                        )));
+                    }
+                }
+                if let Some(done_when) = &input.done_when {
+                    if row.done_condition.as_deref() != Some(done_when.as_str()) {
+                        return Err(Error::Forbidden(format!(
+                            "a delegate cannot change the done condition of a {} item when admitting it; admit it as proposed, or ask the owner",
+                            row.kind.flag()
+                        )));
+                    }
+                }
+                if input.priority == Some(QueuePriority::Normal) {
+                    return Err(Error::Forbidden(format!(
+                        "a delegate cannot lower the priority of a {} item when admitting it",
+                        row.kind.flag()
+                    )));
+                }
             }
             let missing = |what: &str, flag: &str| {
                 Error::Invalid(format!(
@@ -1762,30 +1810,47 @@ impl Store {
             });
             let admitted_by = authority.agent_id();
             let self_admitted = admitted_by.is_some() && admitted_by == row.proposed_by.as_deref();
+            let mut extra = json!({
+                "authority": authority.name(),
+                "admitted_by": admitted_by,
+                "self_admitted": self_admitted,
+                "via": authority.via(),
+                "scope": scope,
+                "done_condition": done_condition,
+                "priority": priority.as_str(),
+                "for_agent": for_agent,
+            });
+            let mut detail = json!({
+                "authority": authority.name(),
+                "admitted_by": admitted_by,
+                "self_admitted": self_admitted,
+                "via": authority.via(),
+                "priority": priority.as_str(),
+                "for_agent": for_agent,
+            });
+            if let Some(reason) = input
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                extra["reason"] = json!(reason);
+                detail["reason"] = json!(reason);
+            }
+            if matches!(authority, Authority::Delegate(_)) && row.kind.is_fast_lane() {
+                extra["kind"] = json!(row.kind.as_str());
+                extra["owner_notice"] = json!("admitted by delegate");
+                detail["kind"] = json!(row.kind.as_str());
+                detail["owner_notice"] = json!("admitted by delegate");
+            }
             record_tx(
                 tx,
                 &row,
                 authority.actor(),
                 "queue.admitted",
-                json!({
-                    "authority": authority.name(),
-                    "admitted_by": admitted_by,
-                    "self_admitted": self_admitted,
-                    "via": authority.via(),
-                    "scope": scope,
-                    "done_condition": done_condition,
-                    "priority": priority.as_str(),
-                    "for_agent": for_agent,
-                }),
+                extra,
                 None,
-                Some(json!({
-                    "authority": authority.name(),
-                    "admitted_by": admitted_by,
-                    "self_admitted": self_admitted,
-                    "via": authority.via(),
-                    "priority": priority.as_str(),
-                    "for_agent": for_agent,
-                })),
+                Some(detail),
             )?;
             tx.execute(
                 "UPDATE queue_items SET state = 'ready', scope = ?2, done_condition = ?3,
@@ -1923,7 +1988,8 @@ impl Store {
             }
             let kind = input.kind.unwrap_or(row.kind);
             if kind != row.kind && row.state == QueueState::Ready {
-                // A ready fast-lane item always carries the owner's own approval.
+                // Raising a ready item to the fast lane needs the owner's own
+                // admission. If a delegate admitted it, reject it and propose it again.
                 match &authority {
                     Authority::Delegate(_) => {
                         return Err(Error::Forbidden(format!(
@@ -2723,6 +2789,19 @@ impl Store {
                 [node],
                 |r| r.get(0),
             )?;
+            let delegate_fast = "admit_authority = 'delegate' AND kind != 'work'";
+            let admitted_recent = items(
+                &format!(
+                    "{delegate_fast} AND admitted_at >= {}",
+                    now - SELF_ADMITTED_RECENT_MS
+                ),
+                "admitted_at DESC, seq DESC",
+            )?;
+            let admitted_total: u32 = conn.query_row(
+                &format!("SELECT count(*) FROM queue_items WHERE node_id = ?1 AND {delegate_fast}"),
+                [node],
+                |r| r.get(0),
+            )?;
             Ok(QueueNeedsOwner {
                 decide_now,
                 awaiting,
@@ -2730,6 +2809,10 @@ impl Store {
                 nobody_can_take,
                 failed_notices,
                 self_admitted: SelfAdmitted { recent, total },
+                admitted_by_delegate: SelfAdmitted {
+                    recent: admitted_recent,
+                    total: admitted_total,
+                },
             })
         })
     }

@@ -1136,7 +1136,8 @@ CREATE INDEX announcements_by_fingerprint ON announcements(agent_id, fingerprint
     // The work queue (queue.rs, docs/QUEUE.md). Node-local in v0.1.0: `node_id` is the home
     // node of an item and `seq` its display number (`Q12`). The CHECK constraints keep the
     // approval rules below the code: a ready or claimed row always carries who admitted it
-    // and when, and a security or data-loss row is never admitted by a delegate.
+    // and when. Through v13 a security or data-loss row could not be admitted by a
+    // delegate; v14 drops that CHECK (D104).
     // `queue_sessions` is created here and first written by session binding.
     r#"
 CREATE TABLE queue_items (
@@ -1261,6 +1262,52 @@ CREATE TABLE transport_sessions (
 ALTER TABLE project_repos ADD COLUMN checkout TEXT NOT NULL DEFAULT '';
 UPDATE hold_waits SET blockers = '[]';
 "#,
+    // v14 (D104): a keyed delegate may admit a security or data-loss item. The table is
+    // rebuilt without the CHECK that limited those rows to the owner; the other approval
+    // CHECKs stay. Rows are copied with their seq values; AUTOINCREMENT follows the rename.
+    r#"
+CREATE TABLE queue_items_new (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id         TEXT NOT NULL UNIQUE,
+    node_id         TEXT NOT NULL REFERENCES nodes(node_id),
+    state           TEXT NOT NULL CHECK (state IN ('proposed','ready','claimed','done')),
+    kind            TEXT NOT NULL CHECK (kind IN ('work','security','data_loss')),
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL DEFAULT '',
+    scope           TEXT,
+    done_condition  TEXT,
+    priority        INTEGER NOT NULL DEFAULT 2 CHECK (priority IN (1, 2)),
+    for_agent       TEXT REFERENCES agents(agent_id),
+    skip_agent      TEXT REFERENCES agents(agent_id),
+    proposed_by     TEXT REFERENCES agents(agent_id),
+    proposed_at     INTEGER NOT NULL,
+    admit_authority TEXT CHECK (admit_authority IN ('owner','delegate')),
+    admitted_by     TEXT REFERENCES agents(agent_id),
+    admitted_at     INTEGER,
+    claimer_id      TEXT REFERENCES agents(agent_id),
+    claimed_at      INTEGER,
+    claim_session   TEXT,
+    outcome         TEXT CHECK (outcome IN ('completed','rejected')),
+    result_summary  TEXT,
+    result_kind     TEXT CHECK (result_kind IN ('pr','commit','file')),
+    result_ref      TEXT,
+    closed_by       TEXT REFERENCES agents(agent_id),
+    closed_at       INTEGER,
+    updated_at      INTEGER NOT NULL,
+    CHECK (state NOT IN ('ready','claimed') OR (admit_authority IS NOT NULL
+           AND admitted_at IS NOT NULL AND scope IS NOT NULL AND done_condition IS NOT NULL)),
+    CHECK (admit_authority IS NULL OR (admit_authority = 'delegate') = (admitted_by IS NOT NULL)),
+    CHECK ((state = 'claimed') = (claimer_id IS NOT NULL)),
+    CHECK ((state = 'done') = (outcome IS NOT NULL)),
+    CHECK (outcome IS NOT 'completed' OR (result_summary IS NOT NULL
+           AND result_kind IS NOT NULL AND result_ref IS NOT NULL AND admitted_at IS NOT NULL))
+);
+INSERT INTO queue_items_new SELECT * FROM queue_items;
+DROP TABLE queue_items;
+ALTER TABLE queue_items_new RENAME TO queue_items;
+CREATE INDEX queue_ready   ON queue_items(state, priority, admitted_at, seq);
+CREATE INDEX queue_claimed ON queue_items(claimer_id) WHERE state = 'claimed';
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -1296,12 +1343,27 @@ fn migrate(conn: &mut Connection, db: Option<&Path>, build: &Build, now: i64) ->
     let latest = MIGRATIONS.len() as i64;
     // An in-memory database has no home: nothing to protect and nowhere to record it.
     let home = db.and_then(Path::parent);
+    // v14 rebuilds queue_items. SQLite ignores a change to the foreign_keys pragma
+    // inside a transaction, so it is turned off before the lock when a migration may
+    // run, and back on after the transaction has closed.
+    let hinted: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let rebuild = hinted < latest;
+    if rebuild {
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+    }
+    let restore_fk = |conn: &Connection| -> Result<()> {
+        if rebuild {
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
+        Ok(())
+    };
     // Read the version inside the write transaction: another process may have migrated
     // while this one waited for the lock (several sessions opening a new home at once).
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (current, origin) = refuse(&tx, home, build, Mark::Forget)?;
     if current == latest {
         drop(tx);
+        restore_fk(conn)?;
         if let Some(home) = home {
             remember(conn, home, build, now);
         }
@@ -1317,8 +1379,14 @@ fn migrate(conn: &mut Connection, db: Option<&Path>, build: &Build, now: i64) ->
         })?;
         taken = Some((home, path));
     }
-    let migrated =
-        apply_pending(&tx, home, build, origin, current, now).and_then(|()| Ok(tx.commit()?));
+    let migrated = match apply_pending(&tx, home, build, origin, current, now) {
+        Ok(()) => tx.commit().map_err(Into::into),
+        Err(e) => {
+            drop(tx);
+            Err(e)
+        }
+    };
+    restore_fk(conn)?;
     let Some((home, path)) = taken else {
         return migrated;
     };
@@ -1632,6 +1700,9 @@ const CATALOGS: &[&str] = &[
     "5b76a246c4ba93c3edd4c1a7d03fe0f19f43aadceed5901dfa0ba6b439be9c54",
     "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
     "fce5179014aaff7d53c71882bfe3870e21d1ff697464193ebeb2c1512327a89a",
+    "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
+    // v14 drops a CHECK on queue_items; CHECKs are not in the catalog shape, so the digest
+    // is unchanged.
     "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
 ];
 

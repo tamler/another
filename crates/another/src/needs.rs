@@ -191,6 +191,8 @@ struct Closing {
     gone_idle: u32,
     failed_notices: Vec<FailedNotice>,
     self_admitted: SelfAdmitted,
+    /// Security and data-loss items a keyed delegate admitted, last seven days and total.
+    admitted_by_delegate: SelfAdmitted,
 }
 
 /// One thing that needs the owner. Every key is always present in the JSON.
@@ -832,6 +834,15 @@ pub fn report(store: &Store, limit: u32) -> anyhow::Result<Report> {
                 recent: queue.self_admitted.recent.iter().map(item_number).collect(),
                 total: queue.self_admitted.total,
             },
+            admitted_by_delegate: SelfAdmitted {
+                recent: queue
+                    .admitted_by_delegate
+                    .recent
+                    .iter()
+                    .map(item_number)
+                    .collect(),
+                total: queue.admitted_by_delegate.total,
+            },
         },
         rows,
     })
@@ -867,6 +878,14 @@ fn closing_lines(c: &Closing) -> Vec<String> {
             plural(c.failed_notices.len() as u32, "notice", "notices"),
             named(notices, 5),
             word(&first.item)
+        ));
+    }
+    if !c.admitted_by_delegate.recent.is_empty() {
+        lines.push(format!(
+            "{} admitted by delegate in the last 7 days ({}), {} in all: another queue list --needs-owner",
+            c.admitted_by_delegate.recent.len(),
+            named(c.admitted_by_delegate.recent.clone(), 10),
+            c.admitted_by_delegate.total
         ));
     }
     if !c.self_admitted.recent.is_empty() {

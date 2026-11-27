@@ -99,7 +99,8 @@ pub enum QueueCmd {
         /// The done condition: what must be true for the item to be finished.
         #[arg(long)]
         done_when: Option<String>,
-        /// security and data-loss items are decided by the owner personally.
+        /// security and data-loss items may be admitted by a keyed delegate;
+        /// they are listed for the owner afterwards.
         #[arg(long, value_enum, default_value = "work")]
         kind: QueueKindArg,
     },
@@ -120,7 +121,8 @@ pub enum QueueCmd {
         #[arg(long)]
         self_admitted: bool,
         /// What needs the owner: decisions waiting, quiet claims, ready items nobody can
-        /// take, failed notices and self-admitted items.
+        /// take, failed notices, security and data-loss items a delegate admitted, and
+        /// self-admitted items.
         #[arg(
             long,
             conflicts_with_all = ["state", "scope", "mine", "self_admitted"]
@@ -149,6 +151,9 @@ pub enum QueueCmd {
         /// Offer the item to this agent first.
         #[arg(long = "for", value_name = "AGENT")]
         for_agent: Option<String>,
+        /// Required when a keyed delegate admits a security or data-loss item.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Reject a proposed or ready item, with a reason.
     Reject {
@@ -231,7 +236,7 @@ pub enum QueueCmd {
     /// How many claimed, unfinished items an agent may hold.
     #[command(subcommand)]
     Limit(QueueLimitCmd),
-    /// The agents that may admit work items with a key.
+    /// The agents that may admit work, security, and data-loss items with a key.
     #[command(subcommand)]
     Delegate(QueueDelegateCmd),
     /// Show the grace period, or set it (2h to 30d; --owner only).
@@ -540,12 +545,14 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
             done_when,
             priority,
             for_agent,
+            reason,
         } => {
             let input = AdmitItem {
                 scope,
                 done_when,
                 priority: priority.map(Into::into),
                 for_agent,
+                reason,
             };
             input.validate()?;
             let (caller, revision) = admitter(who, || {
@@ -563,6 +570,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
                     &[
                         ("priority", input.priority.map(|p| p.as_str().to_string())),
                         ("for", input.for_agent.clone()),
+                        ("reason", input.reason.clone()),
                     ],
                 );
                 Ok((text, revision))
@@ -729,7 +737,7 @@ pub fn run(store: &Store, cmd: QueueCmd, json: bool) -> anyhow::Result<ExitCode>
         QueueCmd::Delegate(QueueDelegateCmd::Add { agent, owner }) => {
             let caller = owner_only(owner, "naming a delegate", Ok(()), || {
                 format!(
-                    "Name {agent} a queue delegate as the owner. It will admit, reject, edit and release work items with a key that is printed once."
+                    "Name {agent} a queue delegate as the owner. It will admit, reject, edit and release work items, and may admit security and data-loss items with a reason, with a key that is printed once. Reject, edit, and release of a security or data-loss item stay the owner's."
                 )
             })?;
             let made = store.queue_delegate_add(&caller, &agent)?;
