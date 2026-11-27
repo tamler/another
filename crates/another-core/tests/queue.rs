@@ -1970,7 +1970,8 @@ fn migration_adds_only_queue_tables() {
     // The queue is schema v11. What later schemas added goes too, and comes back with them.
     db.execute_batch(
         "DROP TABLE transport_sessions;
-         ALTER TABLE project_repos DROP COLUMN checkout;",
+         ALTER TABLE project_repos DROP COLUMN checkout;
+         DROP TABLE fed_request_nonces;",
     )
     .unwrap();
     db.pragma_update(None, "user_version", 10).unwrap();
@@ -1987,7 +1988,9 @@ fn migration_adds_only_queue_tables() {
     let after = table_counts(&db);
     let kept: Vec<_> = after
         .iter()
-        .filter(|(n, _)| !n.starts_with("queue_") && n != "transport_sessions")
+        .filter(|(n, _)| {
+            !n.starts_with("queue_") && n != "transport_sessions" && n != "fed_request_nonces"
+        })
         .cloned()
         .collect();
     assert_eq!(kept, before, "every existing table keeps every row");

@@ -866,6 +866,48 @@ fn peer_row(conn: &Connection, node_id: &str) -> Result<Option<PeerRow>> {
         .map(|(role, perms, revoked)| (role, perms_of(&perms), revoked)))
 }
 
+/// How far a signed request's time may be from the hub's clock, either way.
+const REQUEST_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// A hub keeps the nonces of a node's signed requests whose time is at most this far below
+/// the highest time it accepted from that node, and refuses a request older than that.
+/// Twice the window: a spoke whose clock steps back by less than this is still served.
+pub const REPLAY_RETAIN_MS: i64 = 2 * REQUEST_WINDOW_MS;
+/// The most nonces a hub keeps for one node. A node at it is refused until older ones
+/// age out; a spoke syncing normally makes a few requests a minute.
+pub const REPLAY_ROWS_PER_NODE: i64 = 65_536;
+
+fn request_denied() -> Error {
+    Error::Forbidden("request not signed by a paired node".into())
+}
+
+/// `time_ms` comes from an unauthenticated header: compare without overflow, so an extreme
+/// value can neither panic nor wrap past the window.
+fn request_time_in_window(now: i64, time_ms: i64) -> Result<()> {
+    if now.abs_diff(time_ms) > REQUEST_WINDOW_MS as u64 {
+        return Err(Error::Forbidden(
+            "request time is more than 5 minutes off; check the clocks".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The perms and pinned key of `node_id` when it is a paired, unrevoked spoke with a key.
+fn paired_spoke_key(conn: &Connection, node_id: &str) -> Result<(String, String)> {
+    let row: Option<(String, Option<i64>, Option<String>)> = conn
+        .query_row(
+            "SELECT p.perms, p.revoked_at, n.public_key FROM peers p
+             JOIN nodes n ON n.node_id = p.node_id
+             WHERE p.node_id = ?1 AND p.role = 'spoke' AND n.is_local = 0",
+            [node_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    match row {
+        Some((perms, None, Some(key))) => Ok((perms, key)),
+        _ => Err(request_denied()),
+    }
+}
+
 /// Refuses to join `node_id` as a hub when this node already has it paired in another role.
 /// A join writes only a `hub` row: otherwise an invite made by one of this node's spokes
 /// would give that spoke the permissions it named and clear its revoke.
@@ -1924,33 +1966,137 @@ impl Store {
         body: &[u8],
         signature: &str,
     ) -> Result<Vec<Perm>> {
-        let denied = || Error::Forbidden("request not signed by a paired node".into());
-        // `time_ms` comes from an unauthenticated header: compare without overflow, so an
-        // extreme value can neither panic nor wrap past the window.
-        if self.now().abs_diff(time_ms) > 5 * 60 * 1000 {
-            return Err(Error::Forbidden(
-                "request time is more than 5 minutes off; check the clocks".into(),
-            ));
-        }
+        request_time_in_window(self.now(), time_ms)?;
         self.read(|conn| {
-            let row: Option<(String, Option<i64>, Option<String>)> = conn
-                .query_row(
-                    "SELECT p.perms, p.revoked_at, n.public_key FROM peers p
-                     JOIN nodes n ON n.node_id = p.node_id
-                     WHERE p.node_id = ?1 AND p.role = 'spoke' AND n.is_local = 0",
-                    [node_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
-            let Some((perms, None, Some(key))) = row else {
-                return Err(denied());
-            };
+            let (perms, key) = paired_spoke_key(conn, node_id)?;
             let msg = crypto::request_message(method, path_and_query, time_ms, body);
             if crypto::verify_strict(&key, &msg, signature) {
                 Ok(perms_of(&perms))
             } else {
-                Err(denied())
+                Err(request_denied())
             }
+        })
+    }
+
+    /// Spoke side: sign a node-to-node request with the version 2 signature, for the hub
+    /// `hub_node_id` and the request's `nonce`.
+    pub fn sign_request_v2(
+        &self,
+        hub_node_id: &str,
+        method: &str,
+        path_and_query: &str,
+        time_ms: i64,
+        nonce: &str,
+        body: &[u8],
+    ) -> String {
+        crypto::sign(
+            self.signing_key(),
+            &crypto::request_message_v2(
+                hub_node_id,
+                self.node_id(),
+                method,
+                path_and_query,
+                time_ms,
+                nonce,
+                body,
+            ),
+        )
+    }
+
+    /// Hub side: check a version 2 signed request from a paired node and use up its nonce,
+    /// in one write transaction, so each signed request is served once. Returns the node's
+    /// granted perms. Refused, with nothing written: a time outside the window, a malformed
+    /// nonce, a node that is not a paired spoke, a signature that is not the node's over
+    /// this request to this hub, a time below what this hub already accepted from the
+    /// node by more than [`REPLAY_RETAIN_MS`], a node with [`REPLAY_ROWS_PER_NODE`] nonces
+    /// kept, and a nonce already used. The rule and why it holds are in docs/FEDERATION.md.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_and_consume_peer_request(
+        &self,
+        node_id: &str,
+        method: &str,
+        path_and_query: &str,
+        time_ms: i64,
+        nonce: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<Vec<Perm>> {
+        request_time_in_window(self.now(), time_ms)?;
+        if !crypto::is_request_nonce(nonce) {
+            return Err(Error::Invalid(
+                "x-another-nonce must be 32 lowercase hex characters".into(),
+            ));
+        }
+        // Verify in a read so a bad signature does not take the write lock.
+        let (_perms, key) = self.read(|conn| paired_spoke_key(conn, node_id))?;
+        let msg = crypto::request_message_v2(
+            self.node_id(),
+            node_id,
+            method,
+            path_and_query,
+            time_ms,
+            nonce,
+            body,
+        );
+        if !crypto::verify_strict(&key, &msg, signature) {
+            return Err(request_denied());
+        }
+        self.write(|tx| {
+            let (perms, key) = paired_spoke_key(tx, node_id)?;
+            let msg = crypto::request_message_v2(
+                tx.node_id,
+                node_id,
+                method,
+                path_and_query,
+                time_ms,
+                nonce,
+                body,
+            );
+            if !crypto::verify_strict(&key, &msg, signature) {
+                return Err(request_denied());
+            }
+            let highest: Option<i64> = tx.query_row(
+                "SELECT MAX(request_time) FROM fed_request_nonces WHERE node_id = ?1",
+                [node_id],
+                |r| r.get(0),
+            )?;
+            if highest.is_some_and(|h| time_ms < h.saturating_sub(REPLAY_RETAIN_MS)) {
+                return Err(Error::Forbidden(
+                    "request time is older than requests this hub already accepted from this                      node by more than 10 minutes; check the clocks"
+                        .into(),
+                ));
+            }
+            let floor = highest
+                .unwrap_or(time_ms)
+                .max(time_ms)
+                .saturating_sub(REPLAY_RETAIN_MS);
+            tx.execute(
+                "DELETE FROM fed_request_nonces WHERE node_id = ?1 AND request_time < ?2",
+                params![node_id, floor],
+            )?;
+            let kept: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM fed_request_nonces WHERE node_id = ?1",
+                [node_id],
+                |r| r.get(0),
+            )?;
+            if kept >= REPLAY_ROWS_PER_NODE {
+                return Err(Error::Forbidden(
+                    "too many signed requests from this node in the last 10 minutes; try again                      later"
+                        .into(),
+                ));
+            }
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO fed_request_nonces (node_id, nonce, request_time, seen_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![node_id, nonce, time_ms, tx.now],
+            )?;
+            if inserted == 0 {
+                return Err(Error::Forbidden(
+                    "request already seen: its nonce was used; a signed request is served once"
+                        .into(),
+                ));
+            }
+            Ok(perms_of(&perms))
         })
     }
 

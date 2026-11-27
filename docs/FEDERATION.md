@@ -465,10 +465,16 @@ Because an older hub relays both kinds as activity events, a marker for a messag
   - `x-another-node: <node id>`
   - `x-another-time: <ms>`
   - `x-another-signature: <Ed25519 over "another-request-v1\n{method}\n{path?query}\n{time}\n{sha256(body)}">`
+  - `x-another-nonce: <16 random bytes as 32 lowercase hex characters>`, new for every request, a retry included.
+  - `x-another-signature-v2: <Ed25519 over "another-request-v2\n{hub node_id}\n{node_id}\n{method}\n{path?query}\n{time}\n{nonce}\n{sha256(body)}">`, where `{hub node_id}` is the id the spoke pinned for its hub at pairing and `{nonce}` is the `x-another-nonce` header.
 
-  - `x-another-nonce: <16 random bytes as 32 lowercase hex characters>`, new for every request, a retry included. It is not part of the request signature.
+  A hub serves a push or a pull only on `x-another-signature-v2`, checked with the strict rules against the key it pinned for the node. The signature is checked in a read; only then, in a write transaction, the hub rechecks the peer, records the nonce, and prunes stale nonces. The nonce is recorded at signature check, before the work, so a request is served once: a captured request sent again, before or after a hub restart, a revoke or a new pairing, is refused (`401`, `request already seen`). Because the hub's id is signed, a request is not valid at any other hub that pins the same node key. The hub keeps the nonces of a node whose request time is at most 10 minutes below the highest time it accepted from that node, refuses a request older than that (`401`), and keeps at most 65,536 per node (`401` beyond that, until older ones age out). Those rows survive restarts; with WAL and `synchronous = NORMAL`, a power loss can roll back the last commits, and then also the work those requests did, so a replay does no more than the original. A hub restored from a backup has the nonces of the backup's time only: a request captured after the backup and still inside its 5 minutes is served once more by the restored hub.
 
-  The hub rejects requests from unpaired or revoked nodes, and requests whose clock is more than 5 minutes off (`401`). After that check, and before anything is stored or read from its log, it answers a request with no `x-another-nonce` with `426`, the header `Upgrade: another-signed-sync/1` and an `invalid` error, and one whose nonce is not 32 lowercase hex characters with `400`.
+  A spoke still sends `x-another-signature` so that a hub of the build before keeps serving it during an upgrade. A hub of this build never serves a request on that one; it only uses it to answer an older node.
+
+  The hub rejects requests from unpaired or revoked nodes, and requests whose clock is more than 5 minutes off (`401`). After that check, and before anything is stored or read from its log, it answers a request with no `x-another-nonce` with `426`, the header `Upgrade: another-signed-sync/1` and an `invalid` error, and one whose nonce is not 32 lowercase hex characters with `400`. One with a nonce but no `x-another-signature-v2` (a node of the build before) is answered `401` with the header `Upgrade: another-signed-request/2` and a `forbidden` error that tells the node to update; it is `401`, not `426`, because a node of that build quotes the hub's text for every refusal except a `426`.
+
+  **Upgrading.** Update the spokes first, then the hub. A spoke of this build syncs with a hub of the build before (that hub checks `x-another-signature` and signs its answer over it; the spoke accepts an answer signed over either of its own two signatures). A hub of this build refuses a spoke of the build before until that spoke is updated; nothing is stored or lost, and no new pairing is needed. Until the hub is updated, it can still be sent a captured request again.
 - Every `200` answer to a push or a pull carries `x-another-signature`: the hub's Ed25519 signature, checked by the spoke with the strict rules against the hub key it pinned at pairing, over these fields joined by one `\n`:
 
   ```
@@ -476,7 +482,7 @@ Because an older hub relays both kinds as activity events, a marker for a messag
   {hub node_id}
   {spoke node_id}
   {the request's x-another-nonce}
-  {the request's x-another-signature, as text}
+  {the request's x-another-signature-v2, as text; a hub of the build before uses x-another-signature}
   {sha256_hex(answer body)}
   ```
 

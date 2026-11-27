@@ -1161,8 +1161,12 @@ fn upgrade_drops_cross_checkout_blocks() {
     // Take the home back one schema: no checkout column, the older key rules, and the wait
     // from worktree B that the build of that schema recorded against the hold in A.
     let db = Connection::open(&db_path).unwrap();
-    db.execute_batch("ALTER TABLE project_repos DROP COLUMN checkout")
-        .unwrap();
+    // What later schemas added goes too, and comes back with them.
+    db.execute_batch(
+        "ALTER TABLE project_repos DROP COLUMN checkout;
+         DROP TABLE fed_request_nonces;",
+    )
+    .unwrap();
     db.pragma_update(None, "user_version", SCOPED - 1).unwrap();
     let current_keys: i64 = db
         .query_row(
@@ -1222,9 +1226,13 @@ fn upgrade_drops_cross_checkout_blocks() {
     let saved = backups(&home);
     assert_eq!(saved.len(), 1, "{saved:?}");
     assert_eq!(version(&saved[0]), SCOPED - 1);
+    // The later schema's table comes back, empty.
+    let rows_after: Vec<_> = row_counts(&db)
+        .into_iter()
+        .filter(|(n, c)| !(n == "fed_request_nonces" && *c == 0))
+        .collect();
     assert_eq!(
-        row_counts(&db),
-        rows_before,
+        rows_after, rows_before,
         "holds, mail, requests, queue items and waits: every row is still there"
     );
     assert_eq!(hold_row(&db), hold_before, "the hold is live and unchanged");

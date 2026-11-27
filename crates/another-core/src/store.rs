@@ -1518,6 +1518,19 @@ CREATE TABLE transport_sessions (
 ALTER TABLE project_repos ADD COLUMN checkout TEXT NOT NULL DEFAULT '';
 UPDATE hold_waits SET blockers = '[]';
 "#,
+    // The nonces of version 2 signed requests a hub accepted, so each is served once
+    // (federation.rs, `verify_and_consume_peer_request`). Hub-local, never built from
+    // events, and kept through a revoke and a re-pair of the node.
+    r#"
+CREATE TABLE fed_request_nonces (
+    node_id      TEXT    NOT NULL,
+    nonce        TEXT    NOT NULL,
+    request_time INTEGER NOT NULL,
+    seen_at      INTEGER NOT NULL,
+    PRIMARY KEY (node_id, nonce)
+);
+CREATE INDEX fed_request_nonces_time ON fed_request_nonces (node_id, request_time);
+"#,
 ];
 
 /// Switch to WAL. While several connections convert a new database at once, SQLite answers
@@ -1890,6 +1903,7 @@ const CATALOGS: &[&str] = &[
     "b07ccde4e870699aff968c4508b5944ac3cc5ae157acfb336bfdc3a16e5f6325",
     "fce5179014aaff7d53c71882bfe3870e21d1ff697464193ebeb2c1512327a89a",
     "64dbec6f2d3fd1bbe217ca67bfa028fd5d918904278683eefa7032ed96e89c9e",
+    "f65ca9ad576af350c6cfe28f6dd3a1d9a30b1cc10c6f55fb23ae753defd486d0",
 ];
 
 /// The digest this build holds for schema `version`.
@@ -2331,7 +2345,8 @@ mod upgrade_tests {
         // Take the home back to exactly main's v8 schema, keeping every v8 row.
         let db = Connection::open(home.join(DB_FILE)).unwrap();
         db.execute_batch(
-            "ALTER TABLE project_repos DROP COLUMN checkout;
+            "DROP TABLE fed_request_nonces;
+             ALTER TABLE project_repos DROP COLUMN checkout;
              DROP TABLE transport_sessions;
              DROP TABLE queue_history;
              DROP TABLE queue_items;
