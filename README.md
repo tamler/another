@@ -83,7 +83,7 @@ For a client that accepts JSON MCP settings, add this server entry:
 }
 ```
 
-The client must find the installed binary on `PATH`, start it in the project checkout and inherit `ANOTHER_HOME` if you changed it. The config file and format depend on the client.
+The client must find the installed binary on `PATH` and inherit `ANOTHER_HOME` if you changed it. The working directory does not matter: hold tools take the project as an argument. The config file and format depend on the client.
 
 To run a background server for your usual home, use `another daemon install`. This keeps `another serve` running under your platform's service manager; [daemon setup](docs/DAEMON.md) covers status, logs and upgrades.
 

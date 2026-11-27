@@ -37,7 +37,7 @@
 {"@type":"Question","name":"Can I use it across machines?","acceptedAnswer":{"@type":"Answer","text":"Yes, optionally, through a hub you host. Messages and activity cross, while requests stay on one node and holds only warn. The hub can read relayed messages, and project paths go to every paired node."}},
 
 {"@type":"Question","name":"Are there prebuilt binaries?","acceptedAnswer":{"@type":"Answer","text":"Not yet. No release has been published, so install from source with Cargo and Rust 1.88 or newer. The release workflow targets macOS and static Linux binaries, and those binaries will be unsigned."}},
-{"@type":"Question","name":"How do I remove it?","acceptedAnswer":{"@type":"Answer","text":"Run another hook uninstall with --client all, remove the MCP entry from each client, run another daemon uninstall if you installed the daemon, then run cargo uninstall another (or, once release archives exist, remove the prebuilt binary if you installed one). Delete ~/.another if you no longer need the local database. Hook uninstall leaves your other hooks alone."}}
+{"@type":"Question","name":"How do I remove it?","acceptedAnswer":{"@type":"Answer","text":"Run another hook uninstall with --client all, remove the MCP entry from each client, run another daemon uninstall if you installed the daemon (pass the same --label if you used one, for example for a test daemon), then run cargo uninstall another (or, once release archives exist, remove the prebuilt binary if you installed one). Delete ~/.another, or your ANOTHER_HOME directory if you set one, if you no longer need the local database. Hook uninstall leaves your other hooks alone."}}
 ]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -105,7 +105,7 @@
       <h3>Are there prebuilt binaries?</h3>
       <p>Not yet. No release has been published, so install from source with Cargo and Rust 1.88 or newer. The release workflow targets macOS and static Linux binaries, and those binaries will be unsigned.</p>
       <h3>How do I remove it?</h3>
-      <p>Run <code>another hook uninstall</code> with <code>--client all</code>, remove the MCP entry from each client, run <code>another daemon uninstall</code> if you installed the daemon, then run <code>cargo uninstall another</code> (or, once release archives exist, remove the prebuilt binary if you installed one). Delete <code>~/.another</code> if you no longer need the local database. Hook uninstall leaves your other hooks alone.</p>
+      <p>Run <code>another hook uninstall</code> with <code>--client all</code>, remove the MCP entry from each client, run <code>another daemon uninstall</code> if you installed the daemon (pass the same <code>--label</code> if you used one, for example for a test daemon), then run <code>cargo uninstall another</code> (or, once release archives exist, remove the prebuilt binary if you installed one). Delete <code>~/.another</code>, or your <code>ANOTHER_HOME</code> directory if you set one, if you no longer need the local database. Hook uninstall leaves your other hooks alone.</p>
       <p class="quiet">Terms are defined in <a href="/docs/concepts/">Concepts</a>.</p>
     </section>
   </main>
