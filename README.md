@@ -16,6 +16,8 @@ Claude Code and Codex cannot see each other without something shared. They can e
 
 `another serve --federation` without `--auth` serves only `/fed/*` and `/health`, even when a proxy rewrites `Host` to loopback. Add `--auth` for token-gated MCP and activity routes; an explicitly enabled dashboard on that federation listener also needs a token. Unauthenticated rejection audits are capped at 32 rows per server store per 60 seconds. Wake subjects and edit-denial hold values use the hook quoting rules. Foreign resource checks use IP literals only and a bounded probe budget; see [federation](docs/FEDERATION.md).
 
+Normal builds expose only signed federation exchange. Library compatibility tests can enable the `another` crate's `test-support` feature to simulate an older unsigned node; workspace tests enable it automatically. Keep that feature off in shipped builds.
+
 ## Why
 
 This is the failure I kept hitting:
@@ -44,6 +46,10 @@ State is one SQLite database on the machine (`~/.another`, or `$ANOTHER_HOME`). 
 
 OAuth for hosted MCP clients (ChatGPT, Claude.ai) is in this tree, and so is the loopback dashboard (`another dashboard`, or `/ui` on a loopback `another serve`). See the [changelog](https://toanother.one/changelog/) and [how I run the agents on this repo](https://toanother.one/building/).
 
+OAuth URI and HTTP Host/Origin ports must be 1 to 65535 written in ASCII decimal without a sign or leading zero; an empty port after `:` is refused. See [remote access](docs/REMOTE.md) for existing-client and allow-list compatibility.
+Malformed client metadata URLs report client metadata errors; `--public-url` errors retain their operator guidance.
+Stored-client warnings for invalid redirect ports show only the escaped authority, without the URI path or query.
+
 The website source lives in [site/](site/README.md). `sh site/build.sh` checks the pages, and `python3 scripts/check-copy.py` rejects em dashes and a banned-phrase list.
 
 For Rust callers, `another_core` exports `now_ms`, `fmt_ts`, `parse_ts`,
@@ -55,6 +61,11 @@ seconds or a suffix (`s`, `m`, `h`, `d` or `w`). Federation
 requests use the store's clock, including a manual clock supplied by a caller.
 MCP `since` inputs and dashboard timeline `since` / `until` filters also accept
 bare seconds, durations, or RFC 3339 times.
+
+Bearer-token creation and OAuth approval reject project globs that cannot compile
+for matching, even when their syntax is valid. Existing stored globs that cannot
+compile continue to grant no project access. Invalid-glob diagnostics show at most
+the first 80 characters of the pattern, followed by its character count when truncated.
 
 ## Quickstart
 
@@ -105,6 +116,12 @@ Besides session start, prompts and session end, the pack adds a hook after each 
 ```bash
 another daemon install
 ```
+
+On macOS, `another daemon status` checks the loaded label's recorded `ANOTHER_HOME`; on Linux it reads the installed systemd unit's `ANOTHER_HOME`. If it belongs to a different home or cannot be verified, status says so and does not report that daemon's PID or health as this home's.
+
+On macOS and Linux, `another doctor` also reads `ANOTHER_HOME` from the installed service definition and flags a different home. Daemon status distinguishes an address it cannot reach, a bind that is not numeric loopback, and a health response that does not identify this home's node.
+
+Daemon status reports healthy only when `/health` identifies this home's node. `another doctor` checks the service manager on both macOS and Linux.
 
 **4. Give agents the MCP tools.** Add Another as a stdio MCP server in each client:
 
@@ -161,6 +178,10 @@ and the fresh-install, hook-pack and daemon dry-run checks. The forced small-sta
 test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.
 Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
 
+Security hardening: local listener scans match only local resource registrations, and terminal text flattens Unicode line and paragraph separators. On Unix, database files and build records are created owner-only (0600), and normal database opens tighten those existing files too. Federation hub calls refuse redirects, and unknown pairing invites are refused before taking the write transaction.
+
+Hub backups are secret material: they contain the node's private signing key, mail and authentication records. Keep them owner-only and protect every copy. Unauthenticated refusal audits have a deliberate write budget during floods; individual refusals can be omitted after that budget is exhausted.
+
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/another#1 |
@@ -215,7 +236,7 @@ Task guides, all listed on the [guides hub](site/guides/index.html) (website sou
 
 | Area | Tools |
 |---|---|
-| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions) |
+| Identity | `ensure_project`, `register_agent`, `heartbeat` (`start` / `end` record sessions; setting both returns `invalid` on local, bearer-token and hosted OAuth MCP) |
 | Mail | `send_message` (with `reply_to`, `create_request`), `fetch_inbox`, `threads`, `acknowledge` |
 | Requests | `claim_request` (`claim` / `release` / `complete` / `cancel`) |
 | Work queue | `queue_propose`, `queue_next` (returns `{claimed, refused}`), `queue_update` (`note` / `release` / `handoff` / `done`), `queue_list`. Local callers only; no tool admits, rejects or edits an item ([docs/QUEUE.md](docs/QUEUE.md)) |
@@ -251,6 +272,8 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Dashboard | `another dashboard` (loopback UI), or `GET /ui` on a loopback `another serve` |
 | External commands | `another <name> [args]` runs `another-<name>` from `PATH` when `<name>` is not built in, like git ([docs/PLUGINS.md](docs/PLUGINS.md)) |
 
+`resource register --meta KEY=VALUE` and `send --field KEY=VALUE` trim keys and require nonempty, unique keys. Missing `=`, empty keys and duplicate keys produce a usage error (exit 2). Metadata keys are stored in sorted order rather than argument order. Metadata values retain whitespace and further `=` characters; see [resources](docs/RESOURCES.md).
+
 ## Concepts
 
 - **Agents** are unique per project and addressed as `name@project`, or `name@project@node` on other nodes. A bare `name` works when it is unambiguous; once a second project registers the same name it stops resolving, and [docs/ADDRESSING.md](docs/ADDRESSING.md) shows the error and the fix.
@@ -263,6 +286,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 ## Safety defaults
 
 - Binds to loopback only, unless you pass `--auth` and `--allow-remote-bind`.
+- Plain unauthenticated `another serve` and `another daemon install` print a warning on stderr: never tunnel or reverse-proxy this local-agent port. It checks no token, and a proxy that rewrites `Host` to loopback lets remote callers read the feed and act as any agent. Use a separate authenticated or federation-only listener for remote access ([docs/REMOTE.md](docs/REMOTE.md)). Federation-only listeners do not print this local-agent exposure warning.
 - The dashboard is loopback-only. An `--auth` server does not serve it unless you pass `--dashboard`, and then it is read-only with message bodies omitted. Its `Host` must still be loopback on the bound port, not a tunnel name. A federation-only listener (`--federation` without `--auth`) never mounts the dashboard, and with both `--federation` and `--auth` an explicitly enabled dashboard also requires a bearer token.
 - Remote tokens and OAuth grants each act as a single agent within project globs. A hosted client is approved on this machine; it is never approved by an HTTP request. Every remote call is audited.
 - Nothing is ever killed without a grace period and an explicit human `--confirm`.
@@ -283,6 +307,8 @@ cargo fmt --all -- --check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The minimum supported Rust version is 1.88.
+
+An opt-in docs/quickstart clarity eval (a model plays a stranger seeing only the public docs) is documented in [evals/quickstart_clarity/README.md](evals/quickstart_clarity/README.md). It stays out of default CI, defaults to offline fixture mode (zero spend), and requires explicit live opt-in, an existing durable spend ledger, per-call/run caps, and billing-confirmation flags before making paid API calls.
 
 ## Clean-room
 
