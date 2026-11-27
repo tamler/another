@@ -1354,13 +1354,16 @@ pub(crate) fn audit_foreign_ownership(
     outcome: &str,
     detail: &str,
 ) -> Result<()> {
+    // Event rows name the signer. A summary covers a batch from the immediate peer,
+    // which can relay events signed by several other nodes.
+    let source = if outcome == "summary" { "peer" } else { "node" };
     tx.execute(
         "INSERT INTO audit_log (node_id, ts, token_id, agent, operation, outcome, detail, remote)
          VALUES (?1, ?2, NULL, ?3, 'federation hold ownership', ?4, ?5, NULL)",
         params![
             tx.node_id,
             tx.now,
-            format!("node:{origin}"),
+            format!("{source}:{origin}"),
             outcome,
             crate::mail::display_line(detail, 700)
         ],
@@ -1881,13 +1884,28 @@ fn holds_by_id(conn: &Connection, ids: &[String]) -> Result<Vec<Hold>> {
 }
 
 impl Store {
-    /// Unreleased legacy holds whose node disagrees with their agent or project.
+    /// Unreleased holds with inconsistent ownership or missing agent/project/node rows.
     /// Returns the total and at most `limit` diagnostic lines. Reads only; no repair.
     pub fn inconsistent_holds(&self, limit: usize) -> Result<(usize, Vec<String>)> {
         self.read(|conn| {
-            let from = "FROM holds h JOIN agents a ON a.agent_id = h.agent_id JOIN projects p ON p.project_id = h.project_id WHERE h.released_at IS NULL AND (h.node_id != a.node_id OR h.node_id != p.node_id)";
+            let from = "FROM holds h
+                LEFT JOIN agents a ON a.agent_id = h.agent_id
+                LEFT JOIN projects p ON p.project_id = h.project_id
+                LEFT JOIN nodes hn ON hn.node_id = h.node_id
+                LEFT JOIN nodes an ON an.node_id = a.node_id
+                LEFT JOIN nodes pn ON pn.node_id = p.node_id
+                WHERE h.released_at IS NULL AND (
+                    a.agent_id IS NULL OR p.project_id IS NULL OR hn.node_id IS NULL
+                    OR an.node_id IS NULL OR pn.node_id IS NULL
+                    OR h.node_id != a.node_id OR h.node_id != p.node_id)";
             let count: i64 = conn.query_row(&format!("SELECT count(*) {from}"), [], |r| r.get(0))?;
-            let mut stmt = conn.prepare(&format!("SELECT h.hold_id, h.node_id, a.node_id, p.node_id {from} ORDER BY h.hold_id LIMIT ?1"))?;
+            let mut stmt = conn.prepare(&format!("SELECT h.hold_id,
+                h.node_id || CASE WHEN hn.node_id IS NULL THEN ' (missing node)' ELSE '' END,
+                CASE WHEN a.agent_id IS NULL THEN 'missing agent'
+                     WHEN an.node_id IS NULL THEN a.node_id || ' (missing node)' ELSE a.node_id END,
+                CASE WHEN p.project_id IS NULL THEN 'missing project'
+                     WHEN pn.node_id IS NULL THEN p.node_id || ' (missing node)' ELSE p.node_id END
+                {from} ORDER BY h.hold_id LIMIT ?1"))?;
             let lines = stmt.query_map([limit.min(i64::MAX as usize) as i64], |r| Ok(format!("hold {} (node {}, agent node {}, project node {})", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok((count as usize, lines))
         })

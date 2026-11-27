@@ -3194,7 +3194,7 @@ impl Store {
                 report.accepted += 1;
             }
             if ownership_events > 20 {
-                crate::holds::audit_foreign_ownership(tx, from, "summary", &format!("and {} more refused or ignored hold events in this batch", ownership_events - 20))?;
+                crate::holds::audit_foreign_ownership(tx, from, "summary", &format!("batch received via peer {from}: and {} more refused or ignored hold events in this batch; event origins are recorded in the individual event rows", ownership_events - 20))?;
             }
             Ok(report)
         })
