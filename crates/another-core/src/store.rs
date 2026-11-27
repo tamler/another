@@ -1579,9 +1579,9 @@ fn latest_backup(home: &Path, schema: i64) -> Option<PathBuf> {
 
 /// The time in a backup's name for the moment `now`.
 fn backup_time(now: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(now).map_or_else(
-        || now.to_string(),
-        |t| t.format("%Y%m%dT%H%M%SZ").to_string(),
+    jiff::Timestamp::from_millisecond(now).map_or_else(
+        |_| now.to_string(),
+        |t| t.strftime("%Y%m%dT%H%M%SZ").to_string(),
     )
 }
 
@@ -1874,6 +1874,13 @@ fn sign_unsigned(conn: &Connection, node_id: &str, key: &ed25519_dalek::SigningK
 mod upgrade_tests {
     use super::*;
     use crate::{AcquireHolds, NewRequest, Program, RegisterAgent, SendMessage};
+
+    #[test]
+    fn backup_time_is_compact_utc() {
+        assert_eq!(backup_time(0), "19700101T000000Z");
+        assert_eq!(backup_time(1_795_766_400_999), "20261127T080000Z");
+        assert_eq!(backup_time(-1), "19691231T235959Z");
+    }
 
     /// Every table and index with its columns, types, constraints and foreign keys, in a
     /// stable order, so two databases built by different paths can be compared.
