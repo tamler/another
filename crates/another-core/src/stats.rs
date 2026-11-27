@@ -16,7 +16,7 @@ use crate::activity::Since;
 use crate::error::Result;
 use crate::identity::resolve_agent;
 use crate::mail::{load_message, Message};
-use crate::store::Store;
+use crate::store::{require_event_seq, Store};
 use crate::time::fmt_ts;
 
 /// Kinds this module writes.
@@ -238,12 +238,7 @@ impl Store {
             let (after_seq, after_ts): (i64, i64) = match &since {
                 None => (0, i64::MIN),
                 Some(Since::Time(t)) => (0, *t),
-                Some(Since::After(id)) => (
-                    conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |r| {
-                        r.get(0)
-                    })?,
-                    i64::MIN,
-                ),
+                Some(Since::After(id)) => (require_event_seq(conn, id)?, i64::MIN),
             };
             let mut stmt = conn.prepare(
                 "SELECT ts, actor, kind, payload FROM events
