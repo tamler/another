@@ -5,50 +5,19 @@
 //! when the parent's subject was stored before subjects were checked (D75). With neither a
 //! subject nor `reply_to`, it is refused.
 
-use another::mcp::AnotherMcp;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+
 use another_core::{Program, RegisterAgent, Store, DB_FILE};
-use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
-use rmcp::service::RunningService;
-use rmcp::{RoleClient, ServiceExt};
+use mcp_http::{call_error, call_ok, in_process as client, Client};
 use serde_json::{json, Value};
 
-type Client = RunningService<RoleClient, ClientConfig>;
-
-async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
-    let args = args.as_object().cloned().expect("object args");
-    client
-        .call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(args))
-        .await
-        .expect("tool call")
-}
-
-async fn call_ok(client: &Client, tool: &str, args: Value) -> Value {
-    let res = call(client, tool, args).await;
-    assert_ne!(res.is_error, Some(true), "{tool} failed: {res:?}");
-    res.structured_content.expect("structured output")
-}
-
 async fn call_err(client: &Client, tool: &str, args: Value) -> (String, String) {
-    let res = call(client, tool, args).await;
-    assert_eq!(res.is_error, Some(true), "{tool} should fail: {res:?}");
-    let text = serde_json::to_value(&res.content).unwrap()[0]["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let body: Value = serde_json::from_str(&text).unwrap();
+    let error = call_error(client, tool, args).await;
     (
-        body["error"]["code"].as_str().unwrap().to_string(),
-        body["error"]["message"].as_str().unwrap().to_string(),
+        error["code"].as_str().unwrap().to_string(),
+        error["message"].as_str().unwrap().to_string(),
     )
-}
-
-async fn client(store: Store) -> Client {
-    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        let server = AnotherMcp::new(store).serve(server_io).await.unwrap();
-        let _ = server.waiting().await;
-    });
-    ClientConfig::default().serve(client_io).await.unwrap()
 }
 
 fn store(dir: &std::path::Path) -> Store {
