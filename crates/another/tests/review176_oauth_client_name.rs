@@ -3,50 +3,22 @@
 //! Dynamic client registration is unauthenticated, so the name must not carry control
 //! characters into that line.
 
-use std::net::SocketAddr;
+#[path = "common/cli.rs"]
+mod cli;
+#[path = "common/mcp_http.rs"]
+mod mcp_http;
+#[path = "common/oauth_client.rs"]
+mod oauth_client;
 
-use another::oauth_http::parse_public_url;
-use another::serve::{http_router, HttpOptions};
 use another_core::Store;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
-
-fn urlencode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
 
 #[tokio::test]
 async fn a_registered_client_name_cannot_carry_terminal_control_characters() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base = format!("http://{addr}");
-    let ct = CancellationToken::new();
-    let opts = HttpOptions {
-        auth: true,
-        bound_port: addr.port(),
-        oauth: Some(parse_public_url(&base).unwrap()),
-        ..Default::default()
-    };
-    let app = http_router(store.clone(), ct.clone(), &opts);
-    let stop = ct.clone();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move { stop.cancelled_owned().await })
-        .await
-        .unwrap();
-    });
+    let srv = mcp_http::start_oauth_http(store).await;
+    let base = srv.base.clone();
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/oauth/register"))
@@ -74,20 +46,16 @@ async fn a_registered_client_name_cannot_carry_terminal_control_characters() {
              &redirect_uri=https%3A%2F%2Fexample.com%2Fcb&state=s\
              &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
              &code_challenge_method=S256&resource={}",
-            urlencode(&format!("{base}/mcp"))
+            oauth_client::encode(&format!("{base}/mcp"))
         );
-        let r = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap()
+        let r = oauth_client::no_redirect_http()
             .get(url)
             .send()
             .await
             .unwrap();
         println!("authorize status: {}", r.status());
     }
-    ct.cancel();
-    server.await.unwrap();
+    srv.stop().await;
 
     println!("register status: {status}; body: {body}");
     assert!(
@@ -103,7 +71,7 @@ async fn a_registered_client_name_cannot_carry_terminal_control_characters() {
 #[test]
 fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
     use another_core::{AuthorizeInput, ClientProfile, ClientRegistration, Program, RegisterAgent};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -148,12 +116,9 @@ fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
     drop(store);
 
     let lines = |args: &[&str]| -> Vec<String> {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = cli::another_cmd(&home)
             .args(args)
             .current_dir(dir.path())
-            .env("ANOTHER_HOME", &home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
             .stdin(Stdio::null())
             .output()
             .expect("run another");
@@ -217,7 +182,7 @@ fn a_stored_client_name_cannot_add_a_row_to_the_oauth_commands() {
 #[test]
 fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     use another_core::{AuthorizeInput, ClientProfile, ClientRegistration, NOT_A_PLAIN_HOST};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -334,12 +299,9 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     drop(db);
     drop(store);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_another"))
+    let out = cli::another_cmd(&home)
         .args(["oauth", "pending"])
         .current_dir(dir.path())
-        .env("ANOTHER_HOME", &home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
         .stdin(Stdio::null())
         .output()
         .expect("run another");
@@ -387,23 +349,17 @@ fn oauth_pending_shows_a_redirect_host_exactly_or_escaped_behind_a_warning() {
     // The audit row of each denial names the host by the same rule. The row of the
     // request itself was written for the plain host the request was made with.
     for code in expected.keys() {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = cli::another_cmd(&home)
             .args(["oauth", "deny", code])
             .current_dir(dir.path())
-            .env("ANOTHER_HOME", &home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
             .stdin(Stdio::null())
             .output()
             .expect("run another");
         assert!(out.status.success(), "{out:?}");
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_another"))
+    let out = cli::another_cmd(&home)
         .args(["audit", "--limit", "100"])
         .current_dir(dir.path())
-        .env("ANOTHER_HOME", &home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
         .stdin(Stdio::null())
         .output()
         .expect("run another");
