@@ -70,11 +70,6 @@ For upgrades and local source installs, see the [install guide](https://toanothe
 
 ## Status
 
-Hosted Windows CI runs the workspace tests, including CLI thread exit-status checks,
-and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack
-test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack.
-Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
-
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | Local core: SQLite event log, agents, messages, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/another#1 |
@@ -97,6 +92,8 @@ Install upgrades from the pre-Windows schema-v8 build are checked on Linux and m
 | M-A | FLE-23 time helpers: shared `now_ms`, `fmt_ts`, `parse_ts` and `parse_duration` | ✅ tamler/another#287 |
 
 **Now: v0.1.0.** The milestones above are what is on `main`. What happens next is set by [docs/VISION.md](docs/VISION.md) and [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md), approved on 17 Nov 2026: a work queue with admission, a durable record of claims and results, upgrade safety, path holds, and a transport adapter interface for waking agents. v0.1.0 is the single-node queue release, with a target tag date of 1 Dec 2026. Cross-node queue claims follow in v0.2.0. Hosted connectors (OAuth), bearer-token peers, reaping, the dashboard, Windows support and external commands are frozen: they stay in the tree and get only security and data-loss fixes.
+
+Hosted Windows CI still runs on the frozen platform: it runs the workspace tests, including CLI thread exit-status checks, and the fresh-install, hook-pack and daemon dry-run checks. The forced small-stack test uses Unix `ulimit`; Windows exercises the CLI with its native main-thread stack. Install upgrades from the pre-Windows schema-v8 build are checked on Linux and macOS.
 
 Current brief: [AGENTS.md](AGENTS.md). Every change merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88, copy lint.
 

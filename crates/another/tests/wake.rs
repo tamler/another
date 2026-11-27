@@ -271,7 +271,7 @@ fn adapters_and_targets() {
     assert_eq!(all[0]["agent"], "bob");
     assert_eq!(all[0]["sent"], false);
     // The session-start digest above already announced bob's mail.
-    assert_eq!(all[0]["skipped"], "no unannounced mail");
+    assert_eq!(all[0]["skipped"], "no unannounced messages");
     let forced = env.json(&["wake", "--all", "--force"]);
     assert_eq!(forced[0]["sent"], false);
     assert!(

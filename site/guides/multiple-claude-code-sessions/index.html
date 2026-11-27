@@ -43,7 +43,7 @@
       <ul>
         <li><strong>Holds don't separate them.</strong> A hold conflicts with other agents, so one session's check passes against the other's hold, overlapping acquires both succeed, and the edit hook lets each session edit the files the other is in.</li>
         <li><strong>The first session to end ends the agent.</strong> Its session-end hook releases every hold, including any the other session took, and marks <code>claude@shop</code> offline until the other session's next prompt.</li>
-        <li><strong>A new-mail notice appears once.</strong> Whichever session has the next tool call or prompt gets it, and the other session hears nothing about that message. Cursor gets no prompt notices at all.</li>
+        <li><strong>A new-message notice appears once.</strong> Whichever session has the next tool call or prompt gets it, and the other session hears nothing about that message. Cursor gets no prompt notices at all.</li>
       </ul>
     </section>
     <section class="guide-section" aria-labelledby="names">
@@ -59,7 +59,7 @@ ANOTHER_AGENT=ui@shop claude</code></pre>
       <p>MCP tools take the identity as an argument, so a session passes its own name, such as <code>{"agent": "parser@shop"}</code> to <code>fetch_inbox</code>. <a href="/guides/mcp-agent-messaging/">MCP messaging</a> lists the arguments.</p>
     </section>
     <section class="guide-section" aria-labelledby="coordinate">
-      <h2 id="coordinate">Mail and holds between the two</h2>
+      <h2 id="coordinate">Messages and holds between the two</h2>
       <p>With distinct names, these work as they do between different clients:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Send messages and check a hold between two sessions"><code>another send --from parser@shop --to ui@shop --subject "API change" --body "Renamed fetch_user."
 another inbox --agent ui@shop

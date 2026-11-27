@@ -71,7 +71,7 @@ Short definitions of the words Another uses, with the places that explain each o
 | Recorded by | `another ack <message-id>` | `another request claim <request-id>` |
 | Means | This agent saw the message | This agent is doing the work |
 | Scope | One agent, one message | One request, at most one owner |
-| Ends with | Nothing; it is a fact about receipt | `request complete` (mails the creator a `Done:` message), `request release`, or `request cancel` by the creator |
+| Ends with | Nothing; it is a fact about receipt | `request complete` (sends the creator a `Done:` message), `request release`, or `request cancel` by the creator |
 | If the agent stops | The ack stays true | The request stays `claimed`. It goes `stale`, and anyone may take it over, once its due time passes or a human confirms Expire in the local dashboard (D42). Without a due time nothing else moves it: the owner releases it or the creator cancels it |
 
 Reading or acknowledging a message never claims its request. A worked example with recorded output is in [REQUESTS.md](REQUESTS.md).
