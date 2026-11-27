@@ -11,8 +11,9 @@ use another_core::{Error, Store};
 use serde::Serialize;
 
 use crate::hooks::{self, Client, HookEnv};
+use crate::http_client::HttpClient;
 
-/// How long the database may stay locked, and how long `/health` may take.
+/// How long doctor waits for a locked database.
 const WAIT: Duration = Duration::from_secs(2);
 /// A hub not synced for this long is worth a warning.
 const HUB_STALE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -509,14 +510,7 @@ fn server(bind: &str, local_node: Option<&str>) -> (Check, bool) {
             false,
         );
     }
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .proxy(None)
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .timeout_global(Some(WAIT))
-            .build(),
-    );
+    let agent = ureq::Agent::new_with_config(HttpClient::Doctor.config());
     match agent.get(&format!("http://{bind}/health")).call() {
         Ok(mut r) if r.status().is_success() => {
             // `another serve` names its node. A server for another home (another node) is

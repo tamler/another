@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod doctor;
 pub mod fed;
 pub mod hooks;
+mod http_client;
 pub mod mcp;
 pub mod needs;
 pub mod oauth_http;

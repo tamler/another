@@ -1019,14 +1019,7 @@ fn healthy(bind: &str, local_node: &str) -> Result<()> {
     {
         bail!("{bind} is not a numeric loopback address; /health was not checked");
     }
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .proxy(None)
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(2)))
-            .build(),
-    );
+    let agent = ureq::Agent::new_with_config(crate::http_client::HttpClient::Daemon.config());
     let mut response = agent
         .get(&format!("http://{bind}/health"))
         .call()
