@@ -555,7 +555,10 @@ async fn remote_hold_reads_follow_the_checkout_rule() {
 
     let feed = call(&client, "activity_feed", json!({ "kinds": ["hold"] })).await;
     assert_eq!(error_code(&feed), None);
-    shows_only_covering("activity_feed", &feed.structured_content.unwrap().to_string());
+    shows_only_covering(
+        "activity_feed",
+        &feed.structured_content.unwrap().to_string(),
+    );
 
     let sum = call(&client, "activity_summarize", json!({})).await;
     assert_eq!(error_code(&sum), None);
@@ -568,7 +571,10 @@ async fn remote_hold_reads_follow_the_checkout_rule() {
     let new = call(&client, "whats_new", json!({ "limit": 20 })).await;
     assert_eq!(error_code(&new), None);
     let new = new.structured_content.unwrap().to_string();
-    assert!(!new.contains(&elsewhere) && !new.contains(&sibling), "{new}");
+    assert!(
+        !new.contains(&elsewhere) && !new.contains(&sibling),
+        "{new}"
+    );
     assert!(!new.contains("private/**"), "{new}");
 
     let board = call(&client, "work_board", json!({ "project": srv.work })).await;

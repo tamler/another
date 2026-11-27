@@ -1057,7 +1057,10 @@ fn a_remote_caller_gets_other_nodes_warnings_without_names() {
     assert!(warning.held.hold_id.is_empty() && warning.held.agent.is_empty());
     assert!(warning.held.project.is_empty() && warning.held.pattern.is_empty());
     let json = serde_json::to_string(&got).unwrap();
-    assert!(!json.contains("mallory") && !json.contains("mine"), "{json}");
+    assert!(
+        !json.contains("mallory") && !json.contains("mine"),
+        "{json}"
+    );
 
     let feed = |scope: Option<&TokenScope>| {
         fed.hub

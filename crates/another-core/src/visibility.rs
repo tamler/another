@@ -70,7 +70,9 @@ impl HoldView {
             "SELECT project_id, abs_path FROM projects WHERE node_id = ?1 ORDER BY project_id",
         )?;
         let projects = stmt
-            .query_map([local], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map([local], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut trees = Vec::new();
         for (project_id, abs_path) in projects {
@@ -241,7 +243,8 @@ impl HoldView {
         };
         let kept = match kind {
             "hold.acquired" | "hold.updated" => {
-                let (Some(project_id), Some(pattern)) = (text(&p, "project_id"), text(&p, "pattern"))
+                let (Some(project_id), Some(pattern)) =
+                    (text(&p, "project_id"), text(&p, "pattern"))
                 else {
                     return Ok(None);
                 };
@@ -267,9 +270,18 @@ impl HoldView {
                 p.insert("hold_ids".into(), Value::Array(shown));
                 any
             }
-            "hold.blocked" => return self.blocked_event(conn, p).map(|p| p.map(|p| p.to_string())),
-            "hold.waiting" | "hold.wait.rechecked" | "hold.available" | "hold.recheck_failed"
-            | "hold.wait_failed" | "hold.notify_failed" | "hold.wait.finished" => {
+            "hold.blocked" => {
+                return self
+                    .blocked_event(conn, p)
+                    .map(|p| p.map(|p| p.to_string()))
+            }
+            "hold.waiting"
+            | "hold.wait.rechecked"
+            | "hold.available"
+            | "hold.recheck_failed"
+            | "hold.wait_failed"
+            | "hold.notify_failed"
+            | "hold.wait.finished" => {
                 let (Some(project_id), Some(path)) = (text(&p, "project_id"), text(&p, "path"))
                 else {
                     return Ok(None);
@@ -305,7 +317,10 @@ impl HoldView {
         conn: &Connection,
         mut p: serde_json::Map<String, Value>,
     ) -> Result<Option<Value>> {
-        let Some(project_id) = p.get("project_id").and_then(Value::as_str).map(str::to_string)
+        let Some(project_id) = p
+            .get("project_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
         else {
             return Ok(None);
         };

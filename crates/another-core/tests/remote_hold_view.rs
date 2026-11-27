@@ -274,7 +274,10 @@ fn a_parent_whole_tree_hold_reaches_a_subdirectory_token_and_a_sibling_does_not(
         .whats_new_scoped("bob@sub", None, 20, Some(&token))
         .unwrap();
     let new_text = serde_json::to_string(&new.activity).unwrap();
-    assert!(new_text.contains(&star) && !new_text.contains(&docs), "{new_text}");
+    assert!(
+        new_text.contains(&star) && !new_text.contains(&docs),
+        "{new_text}"
+    );
 
     // The confined board shows the parent's hold in the parent's own section.
     let b = fx.board(&fx.sub, Some(token.clone()));
@@ -460,7 +463,10 @@ fn feed_pages_and_summary_counts_cover_shown_holds_only() {
         .filter(|i| i.kind == "hold.released")
         .collect();
     assert_eq!(released.len(), 1);
-    assert!(released[0].summary.contains("released 1 hold(s)"), "{released:?}");
+    assert!(
+        released[0].summary.contains("released 1 hold(s)"),
+        "{released:?}"
+    );
     assert_eq!(released[0].refs["hold_ids"], json!([star]));
     let local: Vec<ActivityItem> = fx
         .feed(None)
@@ -525,9 +531,15 @@ fn every_hold_event_kind_is_filtered_by_path_and_blocker() {
         ),
         fx.forge("hold.acquired", json!({ "project_id": shop })),
         fx.forge("hold.renewed", json!({ "hold_ids": [1] })),
-        fx.forge("hold.blocked", json!({ "project_id": shop, "conflicts": [7] })),
+        fx.forge(
+            "hold.blocked",
+            json!({ "project_id": shop, "conflicts": [7] }),
+        ),
         fx.forge("hold.blocked", json!({ "project_id": shop })),
-        fx.forge("hold.zzz", json!({ "project_id": shop, "path": "sub/a.rs" })),
+        fx.forge(
+            "hold.zzz",
+            json!({ "project_id": shop, "path": "sub/a.rs" }),
+        ),
         fx.forge("hold.zzz", json!("not an object")),
     ];
 
@@ -548,7 +560,12 @@ fn every_hold_event_kind_is_filtered_by_path_and_blocker() {
 
     // Locally nothing changes: every event, every blocker, the error text.
     let local = fx.feed(None);
-    for id in shown.iter().map(|(_, id)| id).chain(&hidden).chain(&malformed) {
+    for id in shown
+        .iter()
+        .map(|(_, id)| id)
+        .chain(&hidden)
+        .chain(&malformed)
+    {
         assert!(local.iter().any(|i| &i.event_id == id), "{id}");
     }
     let waiting = local.iter().find(|i| i.event_id == shown[0].1).unwrap();
@@ -567,9 +584,7 @@ fn a_stopped_edit_is_judged_per_conflict() {
     let star = fx.hold("alice@shop", &fx.shop, "**", true);
     let docs = fx.hold("alice@shop", &fx.shop, "docs/**", false);
     let shop = fx.project_id(&fx.shop);
-    let conflict = |p: &str, hold: &str, pattern: &str| {
-        json!({ "path": p, "holder": "alice@shop", "hold_id": hold, "pattern": pattern, "project": "shop" })
-    };
+    let conflict = |p: &str, hold: &str, pattern: &str| json!({ "path": p, "holder": "alice@shop", "hold_id": hold, "pattern": pattern, "project": "shop" });
     let blocked = |conflicts: Value| {
         json!({
             "agent_id": "x", "agent": "wanda@shop", "project_id": shop, "project": "shop",
@@ -579,12 +594,18 @@ fn a_stopped_edit_is_judged_per_conflict() {
     // A: the first conflict is outside the token's tree, a later one inside.
     let a = fx.forge(
         "hold.blocked",
-        blocked(json!([conflict("docs/a.md", &docs, "docs/**"), conflict("sub/b.rs", &star, "**")])),
+        blocked(json!([
+            conflict("docs/a.md", &docs, "docs/**"),
+            conflict("sub/b.rs", &star, "**")
+        ])),
     );
     // B: the first is inside but its hold is hidden; a later one is outside.
     let b = fx.forge(
         "hold.blocked",
-        blocked(json!([conflict("sub/b.rs", &docs, "docs/**"), conflict("docs/a.md", &star, "**")])),
+        blocked(json!([
+            conflict("sub/b.rs", &docs, "docs/**"),
+            conflict("docs/a.md", &star, "**")
+        ])),
     );
     // C: every conflict outside.
     let c = fx.forge(
@@ -596,7 +617,10 @@ fn a_stopped_edit_is_judged_per_conflict() {
     let item = |id: &str| feed.iter().find(|i| i.event_id == id).cloned();
     let a = item(&a).expect("A is kept");
     // `forge` writes the event with actor `system`.
-    assert_eq!(a.summary, "system was stopped editing shop:sub/b.rs (held by alice@shop)");
+    assert_eq!(
+        a.summary,
+        "system was stopped editing shop:sub/b.rs (held by alice@shop)"
+    );
     assert_eq!(a.refs["hold_id"], json!(star));
     let b = item(&b).expect("B is kept");
     assert_eq!(
@@ -615,7 +639,10 @@ fn a_stopped_edit_is_judged_per_conflict() {
         .unwrap();
     let highlights = sum.highlights.join("\n");
     assert!(!highlights.contains("docs/"), "{highlights}");
-    assert!(highlights.contains("held by another agent in this checkout"), "{highlights}");
+    assert!(
+        highlights.contains("held by another agent in this checkout"),
+        "{highlights}"
+    );
 
     let board = fx.board(&fx.sub, Some(token));
     let rows: Vec<&BoardBlocked> = board.projects.iter().flat_map(|p| &p.blocked).collect();
@@ -624,7 +651,10 @@ fn a_stopped_edit_is_judged_per_conflict() {
         assert_eq!(row.path, "sub/b.rs");
     }
     let named: Vec<Option<&str>> = rows.iter().map(|r| r.holder.as_deref()).collect();
-    assert!(named.contains(&Some("alice@shop")) && named.contains(&None), "{named:?}");
+    assert!(
+        named.contains(&Some("alice@shop")) && named.contains(&None),
+        "{named:?}"
+    );
     let hidden = rows.iter().find(|r| r.holder.is_none()).unwrap();
     assert!(hidden.pattern.is_none() && hidden.holder_project.is_none());
 }
@@ -760,7 +790,9 @@ fn wait_then_free(fx: &Fx, rewrite: Option<&str>) -> (String, Message) {
             )
             .unwrap();
     }
-    fx.store.release_holds("alice@shop", &[star.clone()]).unwrap();
+    fx.store
+        .release_holds("alice@shop", std::slice::from_ref(&star))
+        .unwrap();
     fx.store.sweep().unwrap();
     let inbox = fx.store.inbox("bob@sub", InboxQuery::default()).unwrap();
     let free: Vec<Message> = inbox
@@ -794,7 +826,9 @@ fn a_hold_free_notice_names_no_hidden_holder() {
     assert!(!notice.body.contains(&star), "{}", notice.body);
     assert!(!notice.body.contains("alice"), "{}", notice.body);
     assert!(
-        notice.body.contains("no conflicting hold remains in this checkout"),
+        notice
+            .body
+            .contains("no conflicting hold remains in this checkout"),
         "{}",
         notice.body
     );
@@ -833,5 +867,8 @@ fn a_remote_boards_history_scan_is_bounded() {
         .iter()
         .flat_map(|p| p.edits.iter().map(|e| e.path.as_str()))
         .collect();
-    assert!(edits.is_empty(), "the old edit is past the bound: {edits:?}");
+    assert!(
+        edits.is_empty(),
+        "the old edit is past the bound: {edits:?}"
+    );
 }

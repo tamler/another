@@ -2383,7 +2383,11 @@ impl Store {
 
     /// [`Store::holds`] for a caller that may be remote (`scope`): only holds its token may
     /// see (see `visibility`), so a sibling checkout outside its globs is left out.
-    pub fn holds_scoped(&self, filter: HoldFilter, scope: Option<&TokenScope>) -> Result<Vec<Hold>> {
+    pub fn holds_scoped(
+        &self,
+        filter: HoldFilter,
+        scope: Option<&TokenScope>,
+    ) -> Result<Vec<Hold>> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let (project_id, repo_key) = match &filter.project {

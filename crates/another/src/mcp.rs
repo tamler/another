@@ -1227,7 +1227,8 @@ mod tests {
 
     /// Tools a remote connection is denied by `remote::authorize`'s catch-all arm, on
     /// purpose: the queue is the owner's and the node's agents' (QUEUE.md).
-    const DENIED_BY_DEFAULT: &[&str] = &["queue_list", "queue_next", "queue_propose", "queue_update"];
+    const DENIED_BY_DEFAULT: &[&str] =
+        &["queue_list", "queue_next", "queue_propose", "queue_update"];
 
     /// FLE-23 I3 (folded into M-H): every tool this server offers has a decision for remote
     /// callers. A tool reaches `authorize`'s catch-all arm only if it is listed above, so a
