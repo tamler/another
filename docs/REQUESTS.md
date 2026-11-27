@@ -88,7 +88,7 @@ $ another activity --since 1h --kinds request
 
 ## 5a. The worker comes back and completes it
 
-`complete` marks the request `done` and mails the requester a `Done:` message in the original thread. `--note` becomes the body; without one the body is `Request <id> is done.`
+`complete` marks the request `done` and mails the requester a `Done:` message in the original thread. `--note` becomes the body; without one the body is `Request <id> is done.` A note on `complete` or `cancel` is at most 16 KiB.
 
 ```text
 $ another request complete --agent worker 01M77HNNEDVZ92ZVSKQEYXYRB5 --note "Fixed in the retry branch"
@@ -196,6 +196,31 @@ Reminders run in the full sweep, so their timing is the sweep's. A running `anot
 A reminder whose mail cannot be delivered (for example, the recipient's delivery is refused) is rolled back, recorded as a `request.notify_failed` event, and does not fail the sweep. A failure of the database itself, such as a full disk, still fails the sweep's transaction as any write would. Each sent reminder is a `request.reminded` event, shown in `another activity`. Like other request events, these two events reach a federation hub's feed. They carry ids and times only, never a message body; the reminder mail itself stays on this node.
 
 `ANOTHER_REQUEST_REMINDERS=off` turns reminders off for the process that has it set; it is read at every sweep. It is not a node-wide setting: a process without it, such as an MCP server started from a different environment, still sends reminders. To turn them off for a node, set it everywhere the daemon, hooks and MCP clients start. Staleness itself is unchanged.
+
+## Templates
+
+Three kinds of request come up all the time. A template writes the subject and a body with fixed sections, ending in what "done" means, so the receiver gets a complete ask:
+
+```bash
+another send --from lead --to worker --template review --field target="PR #170" --field focus="error paths"
+another send --from lead --to worker --template fix --field issue="inbox --json drops urgent mail" --field repro="..." --due 3600
+another send --from lead --to worker --template research --field question="Which MCP clients honour subscribe?"
+```
+
+| Template | Required | Optional | Ends with |
+|---|---|---|---|
+| `review` | `target` | `focus`, `verdict_file` (default `REVIEW.md`) | **Done when:** a PASS or FAIL verdict with evidence in the verdict file; review only work you did not write |
+| `fix` | `issue` | `repro`, `where` | **Done when:** a test that failed before passes after, with tests, fmt and clippy green |
+| `research` | `question` | `scope` | **Deliver:** findings with sources, uncertainty marked, no code changes |
+
+- `--template` opens a request, as `--request` does. `--due`, `--ack`, `--cc` and `--thread` work as usual.
+- The template writes the subject and the body, so `--subject` and `--body` cannot be combined with it.
+- Fields are one line of text each, with no line breaks, tabs or other control characters. The exceptions are `repro` and `scope`, which may also hold line breaks and tabs. Escape and bidirectional-override characters are refused in every field.
+- Every field value goes into the body as an indented block (four spaces). In Markdown, indented text cannot be a heading, a code fence or an HTML block, so no field can open a section or hide the ones after it.
+- The subject is the prefix and the main field, cut to the 300-character subject limit. The full value is in the body.
+- A missing required field, an unknown or repeated one, or one that breaks these rules is refused, naming the field. This is a usage error: exit status 2, and code `usage` under `--json`.
+- `another send --template list` shows the templates and their fields. It needs no sender or recipient, and `--json` prints them as JSON.
+- Only the message and the request are stored; the subject prefix (`Review:`, `Fix:`, `Research:`) is how you find them later.
 
 ## What this does not do
 

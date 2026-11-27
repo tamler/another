@@ -1,14 +1,16 @@
 # Verify a release archive
 
-No GitHub Release of Another has been published as of 12 Nov 2026. This page describes what the release workflow will publish and how to check it, and records a run of those checks against a local fixture archive, labeled as such. Until a release exists, install with Cargo or build from source ([README](../README.md#quickstart)).
+No GitHub Release of Another has been published as of 27 Nov 2026. This page describes what the release workflow will publish and how to check it, and records a run of those checks against a local fixture archive, labeled as such. Until a release exists, install with Cargo or build from source ([README](../README.md#quickstart)).
 
 ## What the workflow publishes
+
+A tag such as `v0.1.0-rc1` is rejected because the crate version is `0.1.0`; the tag must match it exactly.
 
 Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml). For each target it writes two files and uploads both to the release:
 
 | File | Written by |
 |---|---|
-| `another-VERSION-TARGET.tar.gz` | `tar -czf` of a folder named `another-VERSION-TARGET` holding the `another` binary, `LICENSE`, and `README.md` |
+| `another-VERSION-TARGET.tar.gz` | `tar -czf` of a folder named `another-VERSION-TARGET` holding the `another` binary, `LICENSE`, `NOTICE`, and `README.md` |
 | `another-VERSION-TARGET.tar.gz.sha256` | `shasum -a 256 another-VERSION-TARGET.tar.gz` |
 
 `TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. The workflow does not publish a combined `SHA256SUMS` file; if one appears on a release page later, the same commands below read it, and `--ignore-missing` skips the archives you did not download.
@@ -41,7 +43,7 @@ On macOS use `shasum`, not the `sha256sum` that newer macOS versions also ship. 
 
 ## A recorded run against a fixture
 
-This is fixture data, not a release. The archive was built the way the workflow builds one, from a text file standing in for the binary, and its `.sha256` was written with the same `shasum -a 256` command the workflow uses. Run on 12 Nov 2026 on macOS 27.2.1 with `shasum` 6.02 (Perl) and the Darwin `sha256sum` 1.0 in `/sbin`. Exit statuses are as printed by the shell.
+This is fixture data, not a release. The archive predates the workflow's NOTICE inclusion and used a text file standing in for the binary; it does not verify the current archive contents. Its `.sha256` was written with the same `shasum -a 256` command the workflow uses. Run on 12 Nov 2026 on macOS 27.2.1 with `shasum` 6.02 (Perl) and the Darwin `sha256sum` 1.0 in `/sbin`. Exit statuses are as printed by the shell.
 
 ```text
 $ cat another-0.1.0-aarch64-apple-darwin.tar.gz.sha256

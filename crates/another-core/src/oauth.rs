@@ -21,11 +21,15 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::crypto::{random_bytes, random_hex, secrets_eq, sha256_hex};
 use crate::error::{Error, Result};
 use crate::identity::resolve_agent;
 use crate::store::{new_id, Store, Tx};
 use crate::time::{fmt_opt, fmt_ts};
 use crate::tokens::{AuditRecord, TokenScope};
+
+const CLIENT_NAME_ONE_LINE: &str =
+    "client_name must be one line of text: no line breaks, tabs, escape, other control characters or text-direction characters";
 
 /// Access tokens last one hour.
 pub const ACCESS_TTL_SECS: u64 = 60 * 60;
@@ -41,6 +45,15 @@ const MAX_PENDING: i64 = 50;
 const ACCESS_PREFIX: &str = "anoat_";
 const REFRESH_PREFIX: &str = "anort_";
 const CODE_PREFIX: &str = "anoac_";
+
+type AccessCandidate = (
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
 
 /// A client that may start an authorization request.
 #[derive(Debug, Clone)]
@@ -132,6 +145,27 @@ pub struct OauthGrant {
     pub created_at: String,
     pub revoked_at: Option<String>,
     pub last_used_at: Option<String>,
+    /// The redirect hosts of this grant's stored client that are not plain, escaped
+    /// ([`not_plain_redirect`]). Such a client cannot be approved again (D100).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub client_redirect_not_plain: Vec<String>,
+}
+
+/// A stored client that registration would refuse today (D100).
+#[derive(Debug, Clone, Serialize)]
+pub struct NotPlainClient {
+    pub client_id: String,
+    pub client_name: String,
+    /// Its redirect hosts that are not plain, escaped ([`not_plain_redirect`]).
+    pub redirect_hosts: Vec<String>,
+}
+
+/// The escaped hosts that are not plain among a stored `redirect_uris` column.
+fn not_plain_hosts(redirect_uris: Option<String>) -> Vec<String> {
+    let uris: Vec<String> = redirect_uris
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    uris.iter().filter_map(|u| not_plain_redirect(u)).collect()
 }
 
 /// Tokens just issued. Debug output omits the secrets.
@@ -177,6 +211,8 @@ pub struct RefreshExchange {
 #[derive(Debug)]
 pub enum OAuthFail {
     InvalidRequest(String),
+    /// RFC 7591: a redirect URI in a registration is not acceptable.
+    InvalidRedirectUri(String),
     InvalidClient(String),
     InvalidGrant(String),
     InvalidScope(String),
@@ -191,6 +227,7 @@ impl OAuthFail {
     pub fn code(&self) -> &'static str {
         match self {
             OAuthFail::InvalidRequest(_) => "invalid_request",
+            OAuthFail::InvalidRedirectUri(_) => "invalid_redirect_uri",
             OAuthFail::InvalidClient(_) => "invalid_client",
             OAuthFail::InvalidGrant(_) => "invalid_grant",
             OAuthFail::InvalidScope(_) => "invalid_scope",
@@ -205,6 +242,7 @@ impl OAuthFail {
     pub fn description(&self) -> &str {
         match self {
             OAuthFail::InvalidRequest(m)
+            | OAuthFail::InvalidRedirectUri(m)
             | OAuthFail::InvalidClient(m)
             | OAuthFail::InvalidGrant(m)
             | OAuthFail::InvalidScope(m)
@@ -233,37 +271,7 @@ impl From<Error> for OAuthFail {
 }
 
 fn hash_secret(secret: &str) -> String {
-    Sha256::digest(secret.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn secrets_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-fn random_bytes(n: usize) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; n];
-    getrandom::fill(&mut buf)
-        .map_err(|e| Error::Invalid(format!("no system randomness available: {e}")))?;
-    Ok(buf)
-}
-
-fn random_hex(n: usize) -> Result<String> {
-    Ok(random_bytes(n)?
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    sha256_hex(secret.as_bytes())
 }
 
 fn user_code() -> Result<String> {
@@ -403,6 +411,10 @@ fn parse_port(raw: &str) -> std::result::Result<u16, String> {
 struct ParsedRedirect {
     scheme: String,
     host: String,
+    /// The host and port as the URI has them, which [`is_plain_host`] judges.
+    authority: String,
+    /// The host was written in brackets, which `host` does not keep.
+    bracketed: bool,
     path: String,
     query: Option<String>,
 }
@@ -439,6 +451,8 @@ fn parse_redirect(raw: &str) -> Option<ParsedRedirect> {
     Some(ParsedRedirect {
         scheme,
         host,
+        authority: authority.to_string(),
+        bracketed: authority.starts_with('['),
         path,
         query,
     })
@@ -448,22 +462,43 @@ fn is_loopback_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-/// Whether a redirect URI is acceptable at registration time.
+/// What registration answers for a redirect URI it cannot read or whose host is not plain.
+/// Registration needs no authentication, so no refusal repeats the URI it was sent.
+pub const REDIRECT_URI_NOT_PLAIN: &str = "redirect URI is not allowed: it must be an https or http URI with no white space, `#` or `@`, and its host must be a plain host name or IP address with an optional port from 1 to 65535. An internationalised name must be given in its punycode form.";
+
+/// What the authorization endpoint answers a client stored with a redirect host that is
+/// not plain, which only a build before D100 could store.
+pub const CLIENT_REDIRECT_NOT_PLAIN: &str = "this client is registered with a redirect host that is not a plain host name or IP address. It must register again.";
+
+/// Whether a redirect URI is acceptable at registration time. Its host and port must be
+/// plain ([`is_plain_host`]), so the operator is never asked to approve a redirect to a
+/// host a browser reads differently from how it is shown.
 pub fn validate_redirect_uri(uri: &str, application_type: &str) -> std::result::Result<(), String> {
-    let parsed =
-        parse_redirect(uri).ok_or_else(|| format!("redirect URI {uri:?} is not allowed"))?;
+    let parsed = parse_redirect(uri)
+        .filter(|p| is_plain_host(&p.authority))
+        .ok_or(REDIRECT_URI_NOT_PLAIN)?;
     let loopback = parsed.scheme == "http" && is_loopback_host(&parsed.host);
     if parsed.scheme == "https" || (application_type == "native" && loopback) {
         return Ok(());
     }
     if loopback {
-        return Err(format!(
-            "redirect URI {uri:?} is loopback; register application_type \"native\" (web clients must use https)"
-        ));
+        return Err(
+            "redirect URI is loopback; register application_type \"native\" (web clients must use https)"
+                .into(),
+        );
     }
-    Err(format!(
-        "redirect URI {uri:?} must be https, or http loopback for a native client"
-    ))
+    Err("redirect URI must be https, or http loopback for a native client".into())
+}
+
+/// The host part of a redirect URI when it is not plain, escaped as
+/// [`shown_redirect_host`] escapes one, port included. `None` for a URI registration
+/// accepts today. A client stored by a build before D100 can hold one that is not.
+pub fn not_plain_redirect(uri: &str) -> Option<String> {
+    match parse_redirect(uri) {
+        Some(p) if is_plain_host(&p.authority) => None,
+        Some(p) => Some(escaped_host(&p.authority)),
+        None => Some(escaped_host(uri)),
+    }
 }
 
 /// Exact match, plus the RFC 8252 loopback rule: a registered loopback URI matches the
@@ -475,7 +510,8 @@ pub fn redirect_matches(registered: &[String], requested: &str) -> bool {
     let Some(req) = parse_redirect(requested) else {
         return false;
     };
-    if req.scheme != "http" || !is_loopback_host(&req.host) {
+    // The requested port is free, but it is still one a browser reads as written.
+    if req.scheme != "http" || !is_loopback_host(&req.host) || !is_plain_host(&req.authority) {
         return false;
     }
     registered.iter().any(|raw| {
@@ -490,8 +526,122 @@ pub fn redirect_matches(registered: &[String], requested: &str) -> bool {
     })
 }
 
+/// The host of a redirect URI, without its port. A host written in brackets keeps them:
+/// what is shown is then judged as the URI has it ([`shown_redirect_host`]), so a name is
+/// never taken for an IPv6 address and brackets around a name are never dropped.
 pub fn redirect_host(uri: &str) -> String {
-    parse_redirect(uri).map_or_else(|| "unknown".into(), |p| p.host)
+    parse_redirect(uri).map_or_else(
+        || "unknown".into(),
+        |p| {
+            if p.bracketed {
+                format!("[{}]", p.host)
+            } else {
+                p.host
+            }
+        },
+    )
+}
+
+/// What Another puts in front of a redirect host that is not plain.
+pub const NOT_A_PLAIN_HOST: &str = "[warning: not a plain host name. A browser may read it differently from how it looks. Do not approve it unless you know exactly what it is.] ";
+
+/// The characters of a plain host name.
+fn is_host_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '.' || c == '-'
+}
+
+/// Whether a browser reads a label as a number: all digits, or `0x` and hex digits. When
+/// the last label of a host is one, a browser takes the whole host for an IPv4 number, and
+/// reads a leading `0` as octal and short forms as one number, so `0127.0.0.1` is 87.0.0.1.
+fn is_number_label(label: &str) -> bool {
+    let hex = label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"));
+    match hex {
+        Some(digits) => digits.chars().all(|c| c.is_ascii_hexdigit()),
+        None => !label.is_empty() && label.chars().all(|c| c.is_ascii_digit()),
+    }
+}
+
+/// Whether `host` may be shown as it is. For a plain host, a browser that loads a URI
+/// with this host goes to the host as written here, compared without case; it never goes
+/// to another one. It does not say that a browser can load the URI, that the name
+/// resolves, or that the name is not a look-alike of another name in ASCII.
+///
+/// Plain is one of these, either with an optional `:` and decimal port:
+/// - a name of 1 to 253 ASCII letters, digits, `.` and `-`, with no empty label (so no
+///   leading, trailing or doubled dot), no label that starts or ends with `-`, and a last
+///   label that is not a number ([`is_number_label`]);
+/// - an IPv4 address written the one canonical way: four decimal parts of 0 to 255 with
+///   no leading zero. Every other host whose last label is a number is not plain;
+/// - an IPv6 address in brackets, as `std::net::Ipv6Addr` parses it, with no zone.
+///
+/// Brackets around anything else, and colons outside brackets other than the one before
+/// a port, are not plain.
+fn is_plain_host(host: &str) -> bool {
+    let port = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((inside, after)) = rest.split_once(']') else {
+            return false;
+        };
+        return inside.parse::<std::net::Ipv6Addr>().is_ok()
+            && (after.is_empty() || after.strip_prefix(':').is_some_and(port));
+    }
+    let (name, after) = match host.split_once(':') {
+        Some((name, after)) => (name, Some(after)),
+        None => (host, None),
+    };
+    if !after.is_none_or(port)
+        || !(1..=253).contains(&name.len())
+        || !name.chars().all(is_host_name_char)
+    {
+        return false;
+    }
+    let mut labels = name.split('.');
+    if !labels
+        .clone()
+        .all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-'))
+    {
+        return false;
+    }
+    if labels.next_back().is_some_and(is_number_label) {
+        return name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.to_string() == name);
+    }
+    true
+}
+
+/// A redirect host as the operator is shown it, wherever one is printed: the line
+/// `another serve` prints when a client asks to connect, `another oauth pending` and the
+/// audit rows. The host is the client's text, and registration accepts almost any, so
+/// nothing is assumed about it.
+///
+/// A plain host ([`is_plain_host`]) is shown exactly. Any other is shown whole behind
+/// [`NOT_A_PLAIN_HOST`], with every character that is not an ASCII letter, a digit, `.`
+/// or `-` written as `\u{XXXX}`: a browser ends a host at a backslash and drops zero-width
+/// characters, so such a host can go somewhere other than where it seems to. Nothing is
+/// cut and nothing is turned into a space, so no part of it can be hidden and it cannot
+/// spell another field of the row it is printed in.
+pub fn shown_redirect_host(host: &str) -> String {
+    if is_plain_host(host) {
+        return host.to_string();
+    }
+    format!("{NOT_A_PLAIN_HOST}{}", escaped_host(host))
+}
+
+/// A host with every character that is not an ASCII letter, a digit, `.` or `-` written
+/// as `\u{XXXX}`.
+fn escaped_host(host: &str) -> String {
+    let mut shown = String::new();
+    for c in host.chars() {
+        if is_host_name_char(c) {
+            shown.push(c);
+        } else {
+            shown.push_str(&format!("\\u{{{:04X}}}", u32::from(c)));
+        }
+    }
+    shown
 }
 
 /// Authorization error redirect, including the issuer (`iss`) on every response.
@@ -535,6 +685,9 @@ pub fn validate_cimd(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or("client metadata is missing client_name")?;
+    if client_name.chars().any(crate::is_unsafe_text_char) {
+        return Err(CLIENT_NAME_ONE_LINE.into());
+    }
     if client_name.chars().count() > 120 {
         return Err("client_name is too long".into());
     }
@@ -546,17 +699,14 @@ pub fn validate_cimd(
         return Err("redirect_uris must contain 1 to 10 URIs".into());
     }
     let mut redirect_uris = Vec::new();
-    for u in uris {
+    for (i, u) in uris.iter().enumerate() {
         let u = u
             .as_str()
             .ok_or("redirect_uris must be strings")?
             .to_string();
         // CIMD clients may be native (loopback) or web (https). Accept either shape here;
         // each URI is still checked on its own.
-        let native_ok = validate_redirect_uri(&u, "native").is_ok();
-        if !native_ok {
-            return Err(format!("redirect URI {u:?} is not allowed"));
-        }
+        validate_redirect_uri(&u, "native").map_err(|m| format!("redirect_uris[{i}]: {m}"))?;
         redirect_uris.push(u);
     }
     let method = obj
@@ -727,13 +877,16 @@ fn grant_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OauthGrant> {
         created_at: fmt_ts(r.get(9)?),
         revoked_at: fmt_opt(r.get(10)?),
         last_used_at: fmt_opt(r.get(11)?),
+        client_redirect_not_plain: not_plain_hosts(r.get(12)?),
     })
 }
 
 const GRANT_SELECT: &str = "SELECT g.grant_id, g.client_id, g.client_name, a.address, NULL,
-       g.project_globs, g.label, g.resource, g.scope, g.created_at, g.revoked_at, g.last_used_at
+       g.project_globs, g.label, g.resource, g.scope, g.created_at, g.revoked_at, g.last_used_at,
+       c.redirect_uris
      FROM oauth_grants g JOIN agents a ON a.agent_id = g.agent_id
-     LEFT JOIN projects p ON p.project_id = a.project_id";
+     LEFT JOIN projects p ON p.project_id = a.project_id
+     LEFT JOIN oauth_clients c ON c.client_id = g.client_id AND c.node_id = g.node_id";
 
 fn load_grant(tx: &Tx<'_>, grant_id: &str) -> Result<OauthGrant> {
     tx.query_row(
@@ -928,6 +1081,11 @@ impl Store {
                 "client_name is required and must be at most 120 characters".into(),
             ));
         }
+        // Registration needs no authentication, and `another serve` prints the name on the
+        // operator's terminal when the client asks to connect.
+        if name.chars().any(crate::is_unsafe_text_char) {
+            return Err(OAuthFail::InvalidRequest(CLIENT_NAME_ONE_LINE.into()));
+        }
         if reg.redirect_uris.is_empty() || reg.redirect_uris.len() > 10 {
             return Err(OAuthFail::InvalidRequest(
                 "redirect_uris must contain 1 to 10 URIs".into(),
@@ -942,8 +1100,9 @@ impl Store {
                 )));
             }
         };
-        for uri in &reg.redirect_uris {
-            validate_redirect_uri(uri, application_type).map_err(OAuthFail::InvalidRequest)?;
+        for (i, uri) in reg.redirect_uris.iter().enumerate() {
+            validate_redirect_uri(uri, application_type)
+                .map_err(|m| OAuthFail::InvalidRedirectUri(format!("redirect_uris[{i}]: {m}")))?;
         }
         let client_id = format!("anoc_{}", new_id());
         let uris = serde_json::to_string(&reg.redirect_uris)
@@ -975,7 +1134,7 @@ impl Store {
                         "client {client_id} name {name:?} redirects {}",
                         reg.redirect_uris
                             .iter()
-                            .map(|u| redirect_host(u))
+                            .map(|u| shown_redirect_host(&redirect_host(u)))
                             .collect::<Vec<_>>()
                             .join(",")
                     )),
@@ -1028,6 +1187,16 @@ impl Store {
             return Err(OAuthFail::InvalidRequest(
                 "code_challenge is missing or malformed".into(),
             ));
+        }
+        // A client stored before registration refused such a host (D100) gets no request
+        // row, whichever of its redirect URIs it asks for.
+        if input
+            .client
+            .redirect_uris
+            .iter()
+            .any(|u| not_plain_redirect(u).is_some())
+        {
+            return Err(OAuthFail::InvalidClient(CLIENT_REDIRECT_NOT_PLAIN.into()));
         }
         if !redirect_matches(&input.client.redirect_uris, &input.redirect_uri) {
             return Err(OAuthFail::InvalidRequest(
@@ -1086,7 +1255,8 @@ impl Store {
                     operation: "oauth.authorize".into(),
                     outcome: "pending".into(),
                     detail: Some(format!(
-                        "client {client_name:?} redirect host {redirect_host}"
+                        "client {client_name:?} redirect host {}",
+                        shown_redirect_host(&redirect_host)
                     )),
                     remote,
                     ..Default::default()
@@ -1145,6 +1315,12 @@ impl Store {
                 )));
             }
             let req = load_request(tx, &request_id)?.expect("request exists");
+            // Only a request stored by a build before D100 can name such a host.
+            if not_plain_redirect(&req.redirect_uri).is_some() {
+                return Err(Error::Invalid(format!(
+                    "code {code_key} asks for a redirect to a host that is not a plain host name or IP address, so it cannot be approved. Deny it with `another oauth deny {code_key}`; the client must register again."
+                )));
+            }
             let grant_id = new_id();
             tx.execute(
                 "INSERT INTO oauth_grants (grant_id, node_id, client_id, client_name, agent_id,
@@ -1179,7 +1355,7 @@ impl Store {
                     detail: Some(format!(
                         "client {:?} redirect host {} globs {}",
                         req.client_name,
-                        redirect_host(&req.redirect_uri),
+                        shown_redirect_host(&redirect_host(&req.redirect_uri)),
                         if globs.is_empty() {
                             "none".to_string()
                         } else {
@@ -1227,7 +1403,7 @@ impl Store {
                     detail: Some(format!(
                         "client {:?} redirect host {}",
                         req.client_name,
-                        redirect_host(&req.redirect_uri)
+                        shown_redirect_host(&redirect_host(&req.redirect_uri))
                     )),
                     ..Default::default()
                 },
@@ -1275,6 +1451,27 @@ impl Store {
         })
     }
 
+    /// The stored clients with a redirect host that is not plain. A build before D100
+    /// stored them; they can no longer start an authorization request.
+    pub fn oauth_clients_not_plain(&self) -> Result<Vec<NotPlainClient>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT client_id, client_name, redirect_uris FROM oauth_clients
+                 WHERE node_id = ?1 ORDER BY created_at, client_id",
+            )?;
+            let rows = stmt.query_map([self.node_id()], |r| {
+                Ok(NotPlainClient {
+                    client_id: r.get(0)?,
+                    client_name: r.get(1)?,
+                    redirect_hosts: not_plain_hosts(r.get(2)?),
+                })
+            })?;
+            let mut clients = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            clients.retain(|c| !c.redirect_hosts.is_empty());
+            Ok(clients)
+        })
+    }
+
     pub fn revoke_oauth_grant(&self, grant_id: &str) -> Result<OauthGrant> {
         self.write(|tx| {
             let grant = load_grant(tx, grant_id)?;
@@ -1287,7 +1484,7 @@ impl Store {
                         agent: Some(grant.agent.clone()),
                         operation: "oauth.revoke".into(),
                         outcome: "ok".into(),
-                        detail: Some(format!("client {}", grant.client_name)),
+                        detail: Some(format!("client {:?}", grant.client_name)),
                         ..Default::default()
                     },
                 )?;
@@ -1456,7 +1653,7 @@ impl Store {
                     agent: Some(issued.agent.clone()),
                     operation: "oauth.token".into(),
                     outcome: "ok".into(),
-                    detail: Some(format!("client {}", req.client_name)),
+                    detail: Some(format!("client {:?}", req.client_name)),
                     remote,
                 },
             )?;
@@ -1661,6 +1858,43 @@ impl Store {
         let token_id = token_id.to_string();
         let digest = hash_secret(bearer);
         let expected = canonical_resource(expected_resource).map_err(|_| denied())?;
+        // Reject malformed, expired, revoked, wrong-secret, and wrong-resource candidates
+        // using a read lock. Only a candidate that matches a stored token needs the write
+        // transaction below, where every property is checked again against current state.
+        let valid = self.read(|conn| {
+            let row: Option<AccessCandidate> = conn
+                .query_row(
+                    "SELECT t.secret_hash, t.resource, t.expires_at, t.revoked_at,
+                            g.grant_id, g.revoked_at
+                     FROM oauth_tokens t LEFT JOIN oauth_grants g ON g.grant_id = t.grant_id
+                     WHERE t.token_id = ?1 AND t.kind = 'access'",
+                    [&token_id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(row.is_some_and(
+                |(stored, resource, expires_at, revoked_at, grant_id, grant_revoked_at)| {
+                    secrets_eq(&stored, &digest)
+                        && revoked_at.is_none()
+                        && grant_id.is_some()
+                        && grant_revoked_at.is_none()
+                        && expires_at > self.now()
+                        && canonical_resource(&resource).ok().as_deref() == Some(expected.as_str())
+                },
+            ))
+        })?;
+        if !valid {
+            return Err(denied());
+        }
         self.write(|tx| {
             let row: Option<(String, String, String, i64, Option<i64>)> = tx
                 .query_row(
@@ -1713,6 +1947,261 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The part of a shown host after Another's warning. It must hold nothing but ASCII
+    /// letters, digits, `.`, `-` and whole `\u{XXXX}` escapes.
+    fn escaped_part(shown: &str) -> &str {
+        let rest = shown
+            .strip_prefix(NOT_A_PLAIN_HOST)
+            .unwrap_or_else(|| panic!("no warning in front of {shown:?}"));
+        let mut left = rest;
+        while let Some(c) = left.chars().next() {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                left = &left[1..];
+                continue;
+            }
+            let after = left
+                .strip_prefix("\\u{")
+                .unwrap_or_else(|| panic!("{c:?} is shown as it is in {rest:?}"));
+            let end = after.find('}').expect("an escape is closed");
+            let hex = &after[..end];
+            assert!(
+                hex.len() >= 4 && hex.chars().all(|h| h.is_ascii_hexdigit()),
+                "{rest:?}"
+            );
+            left = &after[end + 1..];
+        }
+        rest
+    }
+
+    /// Review R3 of Q19b. The host is the client's text, and a browser does not read it
+    /// as a person does: it ends the host at a backslash and drops zero-width characters.
+    /// So only a plain host is shown as it is. Anything else is shown whole, each other
+    /// character as an escape, behind a warning. Nothing is cut and nothing becomes a space.
+    #[test]
+    fn a_redirect_host_is_shown_exactly_or_escaped_behind_a_warning() {
+        // Plain: shown exactly, no warning.
+        let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
+        assert_eq!(dns_limit.len(), 253);
+        for plain in [
+            "chatgpt.com",
+            "127.0.0.1",
+            "xn--bcher-kva.example",
+            "chatgpt.com:8443",
+            "[2001:db8::1]",
+            "[2001:db8::1]:8443",
+            dns_limit.as_str(),
+        ] {
+            assert_eq!(shown_redirect_host(plain), plain);
+        }
+
+        // The backslash: a browser sends the code to `attacker.test`.
+        let short = "attacker.test\\good.example.com";
+        assert_eq!(
+            shown_redirect_host(short),
+            format!("{NOT_A_PLAIN_HOST}attacker.test\\u{{005C}}good.example.com")
+        );
+        let long = format!("attacker.test\\{}.good.example.com", "x".repeat(300));
+        let shown = shown_redirect_host(&long);
+        assert_eq!(
+            escaped_part(&shown),
+            format!(
+                "attacker.test\\u{{005C}}{}.good.example.com",
+                "x".repeat(300)
+            )
+        );
+
+        // Zero-width characters: a browser joins the two names into one.
+        let joined = "auth.openai.com\u{200b}\u{200b}\u{200b}chatgpt.com";
+        let shown = shown_redirect_host(joined);
+        assert_eq!(
+            escaped_part(&shown),
+            "auth.openai.com\\u{200B}\\u{200B}\\u{200B}chatgpt.com"
+        );
+        // A host that spells the fields of an `oauth pending` row.
+        let forged = "attacker.test\u{200b}\u{200b}expires\u{200b}2026-11-20t09.00.00.000z\u{200b}\u{200b}redirect\u{200b}host\u{200b}chatgpt.com";
+        let shown = shown_redirect_host(forged);
+        let escaped = escaped_part(&shown);
+        assert!(!escaped.contains(' '), "{escaped:?}");
+        assert!(
+            escaped.starts_with("attacker.test\\u{200B}\\u{200B}expires\\u{200B}"),
+            "{escaped:?}"
+        );
+        // A host that imitates the mark an earlier build used, or the warning itself.
+        for imitation in [
+            "(cut,\u{200b}12\u{200b}characters)\u{200b}...good.example.com".to_string(),
+            format!(
+                "{}good.example.com",
+                NOT_A_PLAIN_HOST.replace(' ', "\u{200b}")
+            ),
+        ] {
+            let shown = shown_redirect_host(&imitation);
+            let escaped = escaped_part(&shown);
+            assert!(escaped.ends_with("good.example.com"), "{escaped:?}");
+            assert!(
+                !escaped.contains(['(', ')', '[', ']', ',', ':', ' ']),
+                "{escaped:?}"
+            );
+        }
+
+        // Nothing is cut: one character over the DNS limit is not plain, and is whole.
+        let over = format!("a{dns_limit}");
+        assert_eq!(
+            shown_redirect_host(&over),
+            format!("{NOT_A_PLAIN_HOST}{over}")
+        );
+        let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+        assert_eq!(
+            shown_redirect_host(&huge),
+            format!("{NOT_A_PLAIN_HOST}{huge}")
+        );
+
+        // An internationalised host is escaped; its punycode form (above) is plain.
+        assert_eq!(
+            shown_redirect_host("b\u{fc}cher.example"),
+            format!("{NOT_A_PLAIN_HOST}b\\u{{00FC}}cher.example")
+        );
+        // Control and text-direction characters, a space, `%`, a tag character.
+        let hostile = "a\u{1b}[2Jb\u{202e}c d%2e\u{e0041}\n.attacker.test";
+        assert_eq!(
+            shown_redirect_host(hostile),
+            format!(
+                "{NOT_A_PLAIN_HOST}a\\u{{001B}}\\u{{005B}}2Jb\\u{{202E}}c\\u{{0020}}d\\u{{0025}}2e\\u{{E0041}}\\u{{000A}}.attacker.test"
+            )
+        );
+        // Not plain either: no host, a bad port, brackets around something else.
+        for odd in [
+            "",
+            "chatgpt.com:",
+            "chatgpt.com:80a",
+            "[attacker.test]",
+            "x:y:z",
+        ] {
+            escaped_part(&shown_redirect_host(odd));
+        }
+    }
+
+    /// Review R4 of Q19b: plain means a browser goes to the host that is shown. A browser
+    /// reads a host whose last label is a number as an IPv4 number, in octal, hex and
+    /// short forms too, so `0127.0.0.1` goes to 87.0.0.1. Such a host is plain only as a
+    /// canonical dotted quad. Brackets are plain only around an IPv6 address.
+    #[test]
+    fn a_plain_host_is_one_a_browser_goes_to_as_shown() {
+        let plain = [
+            "localhost",
+            "claude.ai",
+            "chatgpt.com",
+            "ChatGPT.com",
+            "127.0.0.1",
+            "1.2.3.4",
+            "0.0.0.0",
+            "255.255.255.255",
+            "example.com1",
+            "1example.com",
+            "a1.b2",
+            "0x.example",
+            "[::1]",
+            "[2001:db8::1]",
+            "[2001:DB8::1]:8443",
+            "[::ffff:1.2.3.4]",
+        ];
+        for host in plain {
+            assert_eq!(shown_redirect_host(host), host);
+        }
+        let not_plain = [
+            // A browser reads each of these as a different IPv4 address from the one it
+            // seems to be, or as an address where it seems to be a name or a number.
+            "0127.0.0.1",
+            "010.0.0.1",
+            "0172.16.0.1",
+            "0300.0250.0.1",
+            "127.0.0.010",
+            "010.010.010.010",
+            "1.2.3",
+            "0x",
+            "0x.0x",
+            "0",
+            "00",
+            "0x0",
+            "127.0.0.1.",
+            "1.2.3.4.",
+            "0x7f.1",
+            "0x7f.0.0.1",
+            "0X7F.0.0.1",
+            "2130706433",
+            "017700000001",
+            "0x7f000001",
+            "0177.0.0.1",
+            "127.1",
+            "127.0.1",
+            "127.0.0.01",
+            "4294967295",
+            "1.2.3.0x4",
+            "0x8.0x8.0x8.0x8",
+            // Other hosts that end in a number.
+            "1.2.3.4.5",
+            "256.1.1.1",
+            "256.0.0.1",
+            "08.0.0.1",
+            "01.2.3.4",
+            "0x1.2.3.4",
+            "example.123",
+            "example.0x",
+            "com.1",
+            "123",
+            // A trailing dot, an empty label, a label that starts or ends with `-`.
+            "example.com.",
+            "a..b",
+            ".a",
+            "-a.b",
+            "a-.b",
+            "a.b-",
+            // Brackets around something that is not an IPv6 address, or with a zone.
+            "[attacker.test]",
+            "[evil.test:443]",
+            "[a:b:c]",
+            "[1::2::3]",
+            "[cafe.bad:face:b00c]",
+            "[fe80::1%eth0]",
+            "[::ffff:0127.0.0.1]",
+            "[127.0.0.1]",
+            "[::1]x",
+            "[::1]:",
+            "[::1]:+443",
+            // An IPv6 address or anything else with colons, outside brackets.
+            "2001:db8::1",
+            "::1",
+            "a:b:c",
+            "chatgpt.com:+443",
+        ];
+        for host in not_plain {
+            let shown = shown_redirect_host(host);
+            let escaped = escaped_part(&shown);
+            assert!(!escaped.is_empty(), "{host:?}");
+        }
+        assert_eq!(
+            shown_redirect_host("0127.0.0.1"),
+            format!("{NOT_A_PLAIN_HOST}0127.0.0.1")
+        );
+        assert_eq!(
+            shown_redirect_host("[attacker.test]"),
+            format!("{NOT_A_PLAIN_HOST}\\u{{005B}}attacker.test\\u{{005D}}")
+        );
+
+        // The host of a redirect URI keeps its brackets, so a name is never taken for an
+        // IPv6 address and brackets around a name are never dropped.
+        assert_eq!(
+            redirect_host("https://[2001:DB8::1]:8443/cb"),
+            "[2001:db8::1]"
+        );
+        assert_eq!(redirect_host("http://[::1]:5173/cb"), "[::1]");
+        assert_eq!(
+            redirect_host("https://[attacker.test]/cb"),
+            "[attacker.test]"
+        );
+        assert_eq!(redirect_host("https://chatgpt.com:8443/cb"), "chatgpt.com");
+        assert!(redirect_is_loopback("http://[::1]:5173/cb"));
+    }
 
     #[test]
     fn redirect_rules() {
@@ -1784,6 +2273,16 @@ mod tests {
             .unwrap()
             .remove("token_endpoint_auth_methods_supported");
         assert!(validate_cimd(url, &bad).is_err());
+        // `another serve` prints the name on the operator's terminal.
+        for name in ["Chat\u{1b}]0;x\u{7}GPT", "Chat\nGPT", "Chat\u{202e}GPT"] {
+            let mut bad = doc.clone();
+            bad["client_name"] = serde_json::json!(name);
+            assert_eq!(
+                validate_cimd(url, &bad).err().as_deref(),
+                Some(CLIENT_NAME_ONE_LINE),
+                "{name:?}"
+            );
+        }
     }
 
     #[test]
@@ -2067,6 +2566,434 @@ mod tests {
         assert!(store
             .verify_access_token(&issued.access_token, "https://another.example.com/mcp")
             .is_ok());
+    }
+
+    /// What registration answers for a redirect URI whose host is not plain (D100).
+    const REFUSED: &str = "redirect URI is not allowed: it must be an https or http URI with no white space, `#` or `@`, and its host must be a plain host name or IP address with an optional port from 1 to 65535. An internationalised name must be given in its punycode form.";
+
+    /// The host parts the reviews of pull request 273 found registration to accept, and the
+    /// two port forms it accepted or refused with another message.
+    fn hostile_authorities() -> Vec<String> {
+        let mut hosts: Vec<String> = [
+            "attacker.test\\good.example.com",
+            "auth.openai.com\u{200b}\u{200b}\u{200b}chatgpt.com",
+            "attacker.test\u{200b}\u{200b}expires\u{200b}2026-11-20t09.00.00.000z\u{200b}\u{200b}redirect\u{200b}host\u{200b}chatgpt.com",
+            "0127.0.0.1",
+            "2130706433",
+            "0x7f.1",
+            "1.2.3",
+            "example.com.",
+            "localhost.",
+            "[attacker.test]",
+            "[a:b:c]",
+            "[1::2::3]",
+            "[fe80::1%eth0]",
+            "[fe80::1%25eth0]",
+            "b\u{fc}cher.example",
+            "\u{430}ttacker.test",
+            "%61ttacker.test",
+            "a..b",
+            "-a.example",
+            "chatgpt.com:+443",
+            "127.0.0.1:+443",
+            "[::1]:+443",
+            "localhost:+443",
+            "chatgpt.com:0",
+            "chatgpt.com:65536",
+        ]
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+        hosts.push(format!(
+            "attacker.test\\{}.good.example.com",
+            "x".repeat(300)
+        ));
+        hosts.push(format!("a{}.attacker.test", "a".repeat(253 - 14)));
+        hosts.push(format!(
+            "good.example.com.{}.attacker.test",
+            "h".repeat(5000 - 31)
+        ));
+        hosts
+    }
+
+    fn client_rows(store: &Store) -> i64 {
+        store
+            .read(
+                |conn| Ok(conn.query_row("SELECT count(*) FROM oauth_clients", [], |r| r.get(0))?),
+            )
+            .unwrap()
+    }
+
+    /// Q28: registration refuses a redirect URI whose host is not plain. The answer is the
+    /// same short text for each, it never carries the refused value, and no row is stored.
+    #[test]
+    fn registration_refuses_a_redirect_host_that_is_not_plain() {
+        use crate::store::Clock;
+
+        let (clock, _) = Clock::manual(1_700_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        for authority in hostile_authorities() {
+            for (scheme, application_type) in
+                [("https", "web"), ("https", "native"), ("http", "native")]
+            {
+                let uri = format!("{scheme}://{authority}/cb");
+                assert_eq!(
+                    validate_redirect_uri(&uri, application_type)
+                        .err()
+                        .as_deref(),
+                    Some(REFUSED),
+                    "{uri:?} as {application_type}"
+                );
+                let refused = store
+                    .register_oauth_client(ClientRegistration {
+                        client_name: "ChatGPT".into(),
+                        redirect_uris: vec!["https://chatgpt.com/cb".into(), uri.clone()],
+                        application_type: Some(application_type.into()),
+                        remote: None,
+                    })
+                    .expect_err(&uri);
+                assert_eq!(refused.code(), "invalid_redirect_uri", "{uri:?}");
+                assert_eq!(refused.status(), 400, "{uri:?}");
+                assert_eq!(
+                    refused.description(),
+                    format!("redirect_uris[1]: {REFUSED}"),
+                    "{uri:?}"
+                );
+                assert!(!refused.description().contains(&authority), "{uri:?}");
+            }
+            // A client metadata document is held to the same rule.
+            let url = "https://chatgpt.com/oauth/client.json";
+            let uri = format!("https://{authority}/cb");
+            let doc = serde_json::json!({
+                "client_id": url,
+                "client_name": "ChatGPT",
+                "redirect_uris": ["https://chatgpt.com/cb", uri],
+            });
+            assert_eq!(
+                validate_cimd(url, &doc).err(),
+                Some(format!("redirect_uris[1]: {REFUSED}")),
+                "{uri:?}"
+            );
+        }
+        assert_eq!(client_rows(&store), 0);
+    }
+
+    /// Q28: the clients main serves still register, in a document too, and a loopback
+    /// redirect still matches on any port.
+    #[test]
+    fn registration_accepts_the_ordinary_clients() {
+        let dns_limit = format!("{}.example.test", "a".repeat(253 - 13));
+        for (uri, application_type) in [
+            (
+                "https://chatgpt.com/connector_platform_oauth_redirect",
+                "web",
+            ),
+            ("https://claude.ai/api/mcp/auth_callback", "web"),
+            ("https://ChatGPT.com/cb", "web"),
+            ("https://app.example.com:8443/cb?x=1", "web"),
+            ("https://xn--bcher-kva.example/cb", "web"),
+            ("https://203.0.113.7/cb", "web"),
+            ("https://[2001:db8::1]:8443/cb", "web"),
+            ("https://chatgpt.com:00443/cb", "web"),
+            ("http://localhost:8765/callback", "native"),
+            ("http://localhost/callback", "native"),
+            ("http://127.0.0.1:5173/cb", "native"),
+            ("http://127.0.0.1/callback", "native"),
+            ("http://[::1]:5173/cb", "native"),
+            (&format!("https://{dns_limit}/cb"), "web"),
+        ] {
+            assert_eq!(
+                validate_redirect_uri(uri, application_type),
+                Ok(()),
+                "{uri}"
+            );
+            let url = "https://chatgpt.com/oauth/client.json";
+            let doc = serde_json::json!({
+                "client_id": url,
+                "client_name": "ChatGPT",
+                "redirect_uris": [uri],
+            });
+            assert!(validate_cimd(url, &doc).is_ok(), "{uri}");
+        }
+        for (registered, requested) in [
+            (
+                "http://localhost:8765/callback",
+                "http://localhost:9999/callback",
+            ),
+            ("http://127.0.0.1:5173/cb", "http://127.0.0.1:6001/cb"),
+            ("http://[::1]:5173/cb", "http://[::1]:6001/cb"),
+        ] {
+            assert!(
+                redirect_matches(&[registered.into()], requested),
+                "{requested}"
+            );
+        }
+        // The any-port rule does not let a request bring a port no browser reads.
+        for requested in [
+            "http://127.0.0.1:+80/cb",
+            "http://localhost:+80/callback",
+            "http://[::1]:+80/cb",
+        ] {
+            assert!(
+                !redirect_matches(
+                    &[
+                        "http://localhost:8765/callback".into(),
+                        "http://127.0.0.1:5173/cb".into(),
+                        "http://[::1]:5173/cb".into()
+                    ],
+                    requested
+                ),
+                "{requested}"
+            );
+        }
+    }
+
+    /// Q28, the generated comparison: redirect URIs built from parts, hosts of every shape
+    /// the reviews named. Whatever registration accepts has a plain host and is shown with
+    /// no warning, so the warning of D97 cannot be reached by a new registration.
+    #[test]
+    fn every_host_registration_accepts_is_shown_without_a_warning() {
+        let mut hosts = hostile_authorities();
+        for ordinary in [
+            "chatgpt.com",
+            "ChatGPT.com",
+            "claude.ai",
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.0.0.2",
+            "127.1",
+            "1.2.3.4",
+            "255.255.255.255",
+            "256.1.1.1",
+            "010.010.010.010",
+            "0x7f000001",
+            "017700000001",
+            "1.2.3.4.5",
+            "example.123",
+            "example.com1",
+            "example.0x1",
+            "[::1]",
+            "[2001:db8::1]",
+            "[2001:DB8::1]",
+            "[::ffff:1.2.3.4]",
+            "[::ffff:1.2.3]",
+            "[::1",
+            "::1",
+            "::1]",
+            "[]",
+            "[::1]x",
+            "[localhost]",
+            "[127.0.0.1]",
+            "2001:db8::1",
+            "xn--bcher-kva.example",
+            "xn--a",
+            "a.b-c.d",
+            "a-.b",
+            "a.-b",
+            ".a",
+            "a_b.example",
+            "a b.example",
+            "a\tb.example",
+            "a%20b.example",
+            "a%2eb.example",
+            "a\u{ff0e}b.example",
+            "a\u{3002}b.example",
+            "ex\u{ad}ample.com",
+            "example\u{202e}moc.test",
+            "example\u{1b}[2J.test",
+            "example\u{0}.test",
+            "example\u{7f}.test",
+            "example\u{85}.test",
+            "\u{feff}example.test",
+            "example\u{2060}.test",
+            "\u{1f600}.test",
+            "e\u{301}xample.test",
+            "example.test,chatgpt.com",
+            "example.test;chatgpt.com",
+            "example.test|chatgpt.com",
+            "example.test'",
+            "example.test\"",
+            "<example.test>",
+            "{example.test}",
+            "example.test*",
+            "example.test=",
+            "user:pass",
+            "",
+        ] {
+            hosts.push(ordinary.to_string());
+        }
+        let ports = [
+            "",
+            ":443",
+            ":8443",
+            ":1",
+            ":65535",
+            ":0443",
+            ":00443",
+            ":",
+            ":0",
+            ":65536",
+            ":99999",
+            ":+443",
+            ":-1",
+            ":443a",
+            ":0x1bb",
+            ":443:443",
+            ":\u{664}\u{664}\u{663}",
+            ": 443",
+        ];
+        let schemes = ["https", "HTTPS", "http", "Http"];
+        let paths = ["", "/", "/cb", "/cb?x=1", "?x=1", "\\cb"];
+        let (mut built, mut accepted) = (0usize, 0usize);
+        let mut seen = std::collections::BTreeSet::new();
+        for host in &hosts {
+            for port in ports {
+                for scheme in schemes {
+                    for path in paths {
+                        let uri = format!("{scheme}://{host}{port}{path}");
+                        if !seen.insert(uri.clone()) {
+                            continue;
+                        }
+                        built += 1;
+                        if !["web", "native"]
+                            .iter()
+                            .any(|kind| validate_redirect_uri(&uri, kind).is_ok())
+                        {
+                            continue;
+                        }
+                        accepted += 1;
+                        let host = redirect_host(&uri);
+                        assert!(is_plain_host(&host), "{uri:?} is accepted; host {host:?}");
+                        let shown = shown_redirect_host(&host);
+                        assert_eq!(shown, host, "{uri:?}");
+                        assert!(!shown.contains("warning"), "{uri:?}");
+                        // The port a browser would read is the one written: digits only.
+                        let after = uri.split_once("://").unwrap().1;
+                        let authority = &after[..after.find(['/', '?']).unwrap_or(after.len())];
+                        assert!(is_plain_host(authority), "{uri:?}");
+                        assert!(
+                            authority.is_ascii() && !authority.contains(['\\', '+', '%']),
+                            "{uri:?}"
+                        );
+                        let document = serde_json::json!({
+                            "client_id": "https://chatgpt.com/oauth/client.json",
+                            "client_name": "ChatGPT",
+                            "redirect_uris": [uri],
+                        });
+                        assert!(
+                            validate_cimd("https://chatgpt.com/oauth/client.json", &document)
+                                .is_ok(),
+                            "{uri:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(built >= 1000, "{built} URIs built");
+        assert!(accepted >= 100, "{accepted} of {built} accepted");
+        println!("generated {built}, accepted {accepted}");
+    }
+
+    /// Q28: a client stored by a build before registration refused such hosts is still in
+    /// `oauth_clients`. It cannot start an authorization request, so no row is made for the
+    /// operator to approve, and a request stored before this build cannot be approved.
+    #[test]
+    fn a_stored_client_with_a_host_that_is_not_plain_cannot_be_approved() {
+        use crate::identity::{Program, RegisterAgent};
+        use crate::store::Clock;
+
+        let (clock, _) = Clock::manual(1_700_000_000_000);
+        let store = Store::open_in_memory(clock).unwrap();
+        store
+            .register_agent(RegisterAgent {
+                name: "chatgpt".into(),
+                program: Program::Other,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+        let client = store
+            .register_oauth_client(ClientRegistration {
+                client_name: "ChatGPT".into(),
+                redirect_uris: vec!["https://chatgpt.com/cb".into()],
+                application_type: Some("web".into()),
+                remote: None,
+            })
+            .unwrap();
+        let begin = |uris: Vec<String>, requested: &str| {
+            store.begin_authorization(AuthorizeInput {
+                client: ClientProfile {
+                    client_id: client.client_id.clone(),
+                    client_name: "ChatGPT".into(),
+                    redirect_uris: uris,
+                },
+                redirect_uri: requested.into(),
+                state: None,
+                scope: None,
+                resource: "https://another.example.com/mcp".into(),
+                code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into(),
+                code_challenge_method: "S256".into(),
+                remote: None,
+            })
+        };
+        for authority in hostile_authorities() {
+            let hostile = format!("https://{authority}/cb");
+            // Asked for by itself, and beside a plain one the request names.
+            for (uris, requested) in [
+                (vec![hostile.clone()], hostile.as_str()),
+                (
+                    vec!["https://chatgpt.com/cb".to_string(), hostile.clone()],
+                    "https://chatgpt.com/cb",
+                ),
+            ] {
+                let refused = begin(uris, requested).expect_err(&hostile);
+                assert_eq!(refused.code(), "invalid_client", "{hostile:?}");
+                assert_eq!(
+                    refused.description(),
+                    "this client is registered with a redirect host that is not a plain host name or IP address. It must register again.",
+                    "{hostile:?}"
+                );
+            }
+        }
+        assert!(store.oauth_pending().unwrap().is_empty());
+
+        // A request an older build stored before it was stopped.
+        let waiting = begin(
+            vec!["https://chatgpt.com/cb".into()],
+            "https://chatgpt.com/cb",
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE oauth_requests SET redirect_uri = ?1 WHERE request_id = ?2",
+                    params![
+                        "https://attacker.test\\good.example.com/cb",
+                        waiting.request_id
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let refused = store
+            .approve_oauth(Approval {
+                user_code: waiting.user_code.clone(),
+                agent: "chatgpt".into(),
+                project_globs: vec![],
+                label: None,
+            })
+            .expect_err("a request to a host that is not plain was approved");
+        let text = refused.to_string();
+        assert!(text.contains("not a plain host"), "{text}");
+        assert!(!text.contains('\\'), "{text}");
+        assert!(store.oauth_grants().unwrap().is_empty());
+        // It is still listed, behind the warning of D97, and can be denied.
+        let listed = store.oauth_pending().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(shown_redirect_host(&listed[0].redirect_host).starts_with(NOT_A_PLAIN_HOST));
+        store.deny_oauth(&waiting.user_code).unwrap();
     }
 
     #[test]

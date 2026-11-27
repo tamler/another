@@ -2,9 +2,10 @@
 //! that is offline for days, all over real HTTP through `fed::sync`.
 //!
 //! The hub verifies signed requests against its own clock within five minutes, and
-//! `fed::sync` signs with the wall clock, so the hub always runs on the system clock. A
-//! spoke that was "offline for days" runs on a manual clock that starts days in the past
-//! and catches up to now, so its backlog carries genuinely old timestamps.
+//! `fed::sync` signs with the store clock, so the hub runs on the system clock and a
+//! spoke's manual clock is current whenever it pairs or syncs. While "offline for days",
+//! the spoke's clock starts days in the past and catches up to now, so its backlog
+//! carries genuinely old timestamps.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -319,7 +320,9 @@ fn a_spoke_offline_for_days_catches_up_in_pages() {
     let hub = Hub::start(root.path());
     let alpha = spoke(root.path(), "alpha", Clock::System);
     let start = wall_ms() - 3 * DAY_MS;
-    let (beta_clock, beta_now): (Clock, Arc<AtomicI64>) = Clock::manual(start);
+    // Pairing and sync requests carry the store's time and the hub refuses one more than
+    // five minutes off, so beta's clock stays current through the initial sync.
+    let (beta_clock, beta_now): (Clock, Arc<AtomicI64>) = Clock::manual(wall_ms());
     let beta = spoke(root.path(), "beta", beta_clock);
     hub.join(&alpha);
     hub.join(&beta);
@@ -331,6 +334,7 @@ fn a_spoke_offline_for_days_catches_up_in_pages() {
     sync(&beta);
     sync(&alpha);
 
+    beta_now.store(start, Ordering::SeqCst);
     // Beta is offline for three days. It keeps working: mail to alpha, and a short hold
     // each day that lapses that same day. Alpha and the hub mail beta meanwhile. Both
     // backlogs are larger than one sync page (500 events).

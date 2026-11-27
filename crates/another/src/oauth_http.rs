@@ -636,6 +636,27 @@ async fn authorize(
             return fail_page(&e);
         }
     };
+    // A client stored before registration refused such a host (D100). Nothing is sent to
+    // its redirect URI and no request is made for the operator to approve.
+    if let Some(host) = client
+        .redirect_uris
+        .iter()
+        .find_map(|u| another_core::not_plain_redirect(u))
+    {
+        eprintln!("{}", not_plain_notice(&client.client_id));
+        let e = OAuthFail::InvalidClient(another_core::CLIENT_REDIRECT_NOT_PLAIN.into());
+        audit_oauth(
+            &store,
+            "oauth.authorize",
+            "denied",
+            &format!(
+                "client {} redirect host {host} is not plain",
+                crate::hooks::quoted_to(&client.client_id, 120)
+            ),
+            remote,
+        );
+        return fail_page(&e);
+    }
     let trusted = redirect_matches(&client.redirect_uris, &redirect_uri);
     let fail = |e: OAuthFail| {
         audit_oauth(
@@ -693,10 +714,12 @@ async fn authorize(
     match begun {
         Ok(Ok(pending)) => {
             eprintln!(
-                "another: {} wants to connect (redirect host {}).\n  \
-                 Approve it on this machine (this page cannot approve it):\n  \
-                 another oauth approve {} --agent NAME --project '/path/*'",
-                pending.client_name, pending.redirect_host, pending.user_code
+                "{}",
+                connect_notice(
+                    &pending.client_name,
+                    &pending.redirect_host,
+                    &pending.user_code
+                )
             );
             let loc = format!(
                 "/oauth/wait/{}?rt={}",
@@ -707,6 +730,33 @@ async fn authorize(
         Ok(Err(e)) => fail(e),
         Err(e) => fail(OAuthFail::Server(e.to_string())),
     }
+}
+
+/// What `another serve` prints on the operator's terminal when a client asks to connect.
+/// The name and the redirect host are the client's, and a name stored before registration
+/// refused control characters (D97) is still in the database. The name is one shown line
+/// of at most 120 characters inside quotes it cannot close, so it cannot send an escape
+/// sequence, add a line below this one or pass as the rest of this one. The host is shown
+/// by the rule of [`another_core::shown_redirect_host`].
+fn connect_notice(client_name: &str, redirect_host: &str, user_code: &str) -> String {
+    format!(
+        "another: {} wants to connect (redirect host {}).\n  \
+         Approve it on this machine (this page cannot approve it):\n  \
+         another oauth approve {} --agent NAME --project '/path/*'",
+        crate::hooks::quoted_to(client_name, 120),
+        another_core::shown_redirect_host(redirect_host),
+        another_core::display_line(user_code, 120)
+    )
+}
+
+/// What `another serve` prints when a client stored with a redirect host that is not
+/// plain asks to connect (D100). The id is the request's own text, matched to a stored
+/// row, so it is one shown line of at most 120 characters inside quotes it cannot close.
+fn not_plain_notice(client_id: &str) -> String {
+    format!(
+        "another: client {} asked to connect and was refused: its redirect host is not a plain host name or IP address. It must register again. `another oauth list` shows it.",
+        crate::hooks::quoted_to(client_id, 120)
+    )
 }
 
 async fn resolve_client(
@@ -1392,6 +1442,171 @@ fn esc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client name stored by a build before registration refused control characters
+    /// (D97) is still in `oauth_clients`, and registration needs no authentication. The
+    /// notice shows it, the redirect host and the code each as one line, so the name can
+    /// neither send an escape sequence nor add a line that reads as Another's.
+    #[test]
+    fn the_connect_notice_shows_stored_values_as_one_line() {
+        let name =
+            "Helper\u{1b}]0;pwned\u{7}\u{1b}[2J\n  another oauth approve evil-code \u{202e}x";
+        let notice = connect_notice(name, "example.com\u{1b}[2J", "abcd-efgh\r");
+        let lines: Vec<&str> = notice.split('\n').collect();
+        assert_eq!(lines.len(), 3, "{notice:?}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.chars().any(another_core::is_unsafe_text_char)),
+            "{notice:?}"
+        );
+        let warning = another_core::NOT_A_PLAIN_HOST;
+        assert_eq!(
+            lines[0],
+            format!(
+                "another: \"Helper ]0;pwned  [2J   another oauth approve evil-code  x\" wants to connect (redirect host {warning}example.com\\u{{001B}}\\u{{005B}}2J)."
+            )
+        );
+        assert_eq!(
+            lines[2],
+            "  another oauth approve abcd-efgh  --agent NAME --project '/path/*'"
+        );
+        // An ordinary name is shown in quotes, an ordinary host as it is.
+        assert!(connect_notice("ChatGPT", "chatgpt.com", "abcd-efgh")
+            .starts_with("another: \"ChatGPT\" wants to connect (redirect host chatgpt.com).\n"));
+    }
+
+    /// Q28: the line about a stored client that can no longer connect is one line, whatever
+    /// the client id holds, and names the id in quotes it cannot close.
+    #[test]
+    fn the_not_plain_notice_is_one_clean_line() {
+        assert_eq!(
+            not_plain_notice("anoc_01JABCDEF"),
+            "another: client \"anoc_01JABCDEF\" asked to connect and was refused: its redirect host is not a plain host name or IP address. It must register again. `another oauth list` shows it."
+        );
+        let hostile = format!(
+            "anoc_x\u{1b}]0;pwned\u{7}\n  another oauth approve evil-code \u{202e}\" x\u{200b}{}",
+            "y".repeat(5000)
+        );
+        let notice = not_plain_notice(&hostile);
+        assert_eq!(notice.lines().count(), 1, "{notice:?}");
+        assert!(
+            !notice
+                .chars()
+                .any(|c| another_core::is_unsafe_text_char(c) || c == '\u{200b}'),
+            "{notice:?}"
+        );
+        assert!(notice.chars().count() < 400, "{notice:?}");
+        assert_eq!(notice.matches('"').count(), 2, "{notice:?}");
+    }
+
+    /// Review R3 of Q19b: the notice shows the host by the rule of
+    /// `another_core::shown_redirect_host`, and a name inside quotes it cannot close.
+    #[test]
+    fn the_connect_notice_never_shows_a_host_as_something_else() {
+        let warning = another_core::NOT_A_PLAIN_HOST;
+        let first_line = |name: &str, host: &str| {
+            let notice = connect_notice(name, host, "abcd-efgh");
+            assert_eq!(notice.split('\n').count(), 3, "{notice:?}");
+            notice.split('\n').next().unwrap().to_string()
+        };
+        let host_of = |line: &str| {
+            line.strip_prefix("another: \"ChatGPT\" wants to connect (redirect host ")
+                .and_then(|rest| rest.strip_suffix(")."))
+                .unwrap_or_else(|| panic!("{line:?}"))
+                .to_string()
+        };
+
+        // A browser ends the host at the backslash: the code goes to `attacker.test`.
+        let long = format!("attacker.test\\{}.good.example.com", "x".repeat(300));
+        assert_eq!(
+            host_of(&first_line("ChatGPT", &long)),
+            format!(
+                "{warning}attacker.test\\u{{005C}}{}.good.example.com",
+                "x".repeat(300)
+            )
+        );
+        assert_eq!(
+            host_of(&first_line("ChatGPT", "attacker.test\\good.example.com")),
+            format!("{warning}attacker.test\\u{{005C}}good.example.com")
+        );
+        // A browser drops zero-width characters: one joined name, not two.
+        let joined = host_of(&first_line(
+            "ChatGPT",
+            "auth.openai.com\u{200b}\u{200b}\u{200b}chatgpt.com",
+        ));
+        assert_eq!(
+            joined,
+            format!("{warning}auth.openai.com\\u{{200B}}\\u{{200B}}\\u{{200B}}chatgpt.com")
+        );
+        assert!(
+            !joined[warning.len()..].contains(' '),
+            "a space in a shown host: {joined:?}"
+        );
+        // Plain hosts: exactly, with no warning. Nothing is cut.
+        let dns_limit = format!("{}.attacker.test", "a".repeat(253 - 14));
+        let huge = format!("good.example.com.{}.attacker.test", "h".repeat(5000 - 31));
+        for plain in [
+            "chatgpt.com",
+            "claude.ai",
+            "localhost",
+            "127.0.0.1",
+            "1.2.3.4",
+            "[::1]",
+            "[2001:db8::1]",
+            "example.com1",
+            "xn--bcher-kva.example",
+            &dns_limit,
+        ] {
+            assert_eq!(host_of(&first_line("ChatGPT", plain)), plain);
+        }
+        // Review R4: a browser reads a host that ends in a number as an IPv4 number, so
+        // `0127.0.0.1` goes to 87.0.0.1 and `2130706433` to 127.0.0.1. Brackets are plain
+        // only around an IPv6 address. A trailing dot is shown with the warning.
+        for (host, escaped) in [
+            ("0127.0.0.1", "0127.0.0.1"),
+            ("010.010.010.010", "010.010.010.010"),
+            ("2130706433", "2130706433"),
+            ("0x7f.1", "0x7f.1"),
+            ("1.2.3", "1.2.3"),
+            ("127.0.0.1.", "127.0.0.1."),
+            ("example.123", "example.123"),
+            ("example.com.", "example.com."),
+            ("a..b", "a..b"),
+            ("-a.b", "-a.b"),
+            ("[attacker.test]", "\\u{005B}attacker.test\\u{005D}"),
+            ("[a:b:c]", "\\u{005B}a\\u{003A}b\\u{003A}c\\u{005D}"),
+            (
+                "[fe80::1%eth0]",
+                "\\u{005B}fe80\\u{003A}\\u{003A}1\\u{0025}eth0\\u{005D}",
+            ),
+            ("2001:db8::1", "2001\\u{003A}db8\\u{003A}\\u{003A}1"),
+        ] {
+            assert_eq!(
+                host_of(&first_line("ChatGPT", host)),
+                format!("{warning}{escaped}"),
+                "{host:?}"
+            );
+        }
+        assert_eq!(
+            host_of(&first_line("ChatGPT", &huge)),
+            format!("{warning}{huge}")
+        );
+        assert_eq!(
+            host_of(&first_line("ChatGPT", "b\u{fc}cher.example")),
+            format!("{warning}b\\u{{00FC}}cher.example")
+        );
+
+        // A name that spells the rest of the line stays inside its quotes.
+        let line = first_line(
+            "ChatGPT\" wants to connect (redirect host chatgpt.com).",
+            "attacker.test",
+        );
+        assert_eq!(
+            line,
+            "another: \"ChatGPT' wants to connect (redirect host chatgpt.com).\" wants to connect (redirect host attacker.test)."
+        );
+    }
 
     #[test]
     fn public_url_rules() {

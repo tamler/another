@@ -1,43 +1,49 @@
-//! Wake targets: where to nudge an agent's terminal when it has mail (optional adapters).
-//! Another only stores the target; the CLI runs the adapter (`tmux`, `cmux`, `herdr`).
+//! Wake targets: where to wake an agent's session when it has mail.
+//! Another only stores the transport's name and the target; the CLI runs the transport.
 
 use rusqlite::{params, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::identity::resolve_agent;
 use crate::store::Store;
 use crate::time::fmt_ts;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WakeVia {
-    Tmux,
-    Cmux,
-    Herdr,
+/// The name of a transport: `herdr`, or one the owner configured on this node. Whether a
+/// name is configured is the CLI's question; this type only holds a well-formed name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct WakeVia(String);
+
+/// Whether `name` can name a transport: a lowercase letter, then up to 31 lowercase
+/// letters, digits, `_` or `-`.
+pub fn valid_transport_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 impl WakeVia {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WakeVia::Tmux => "tmux",
-            WakeVia::Cmux => "cmux",
-            WakeVia::Herdr => "herdr",
-        }
+    pub fn herdr() -> WakeVia {
+        WakeVia("herdr".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl std::str::FromStr for WakeVia {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "tmux" => Ok(WakeVia::Tmux),
-            "cmux" => Ok(WakeVia::Cmux),
-            "herdr" => Ok(WakeVia::Herdr),
-            _ => Err(Error::Invalid(format!(
-                "unknown wake adapter {s:?}; expected tmux, cmux or herdr"
-            ))),
+        if !valid_transport_name(s) {
+            return Err(Error::Invalid(format!(
+                "{s:?} cannot name a transport: a name is a lowercase letter, then up to 31 \
+                 lowercase letters, digits, `_` or `-`"
+            )));
         }
+        Ok(WakeVia(s.to_string()))
     }
 }
 
@@ -45,18 +51,59 @@ impl std::str::FromStr for WakeVia {
 pub struct WakeTarget {
     pub agent: String,
     pub via: WakeVia,
-    /// tmux pane (`%3`, `session:1.0`), cmux surface id, or Herdr agent/pane.
+    /// Where that transport delivers a line: a Herdr pane or agent name, a tmux pane
+    /// (`%3`, `session:1.0`), a cmux surface id.
     pub target: String,
     /// True when captured automatically by a session hook.
     pub auto: bool,
     pub updated_at: String,
 }
 
-fn validate_target(target: &str) -> Result<()> {
-    if target.trim().is_empty() || target.len() > 200 || target.chars().any(char::is_control) {
+/// A character that is not a control and still cannot be seen, or changes the order in
+/// which text is shown: zero-width characters and directional marks (U+200B to U+200F),
+/// bidirectional embeddings and overrides (U+202A to U+202E), the word joiner, invisible
+/// operators and bidirectional isolates (U+2060 to U+2069), the byte order mark, the
+/// line and paragraph separators, the Arabic letter mark (U+061C), and the Unicode tag
+/// characters (U+E0000 to U+E007F), which no person sees and a model reads as letters.
+pub(crate) fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// The rule for every target: 1 to 200 printable characters, not starting with `-`.
+/// Printable means no control character and no invisible or direction-changing one: a
+/// target is shown to the owner and passed on a command line as it is.
+pub fn validate_target(target: &str) -> Result<()> {
+    if target.trim().is_empty()
+        || target.chars().count() > 200
+        || target.chars().any(|c| c.is_control() || is_invisible(c))
+    {
         return Err(Error::Invalid(
-            "wake target must be 1-200 printable characters".into(),
+            "wake target must be 1-200 printable characters, with no control, invisible or \
+             bidirectional formatting character"
+                .into(),
         ));
+    }
+    refuse_option_like_target(target)
+}
+
+/// Transports pass the target as a command-line argument, and Herdr takes it positionally,
+/// so a target that starts with `-` would be read as an option. No tmux pane, cmux surface
+/// or Herdr pane starts with one.
+pub fn refuse_option_like_target(target: &str) -> Result<()> {
+    if target.starts_with('-') {
+        return Err(Error::Invalid(format!(
+            "wake target {target:?} starts with '-', which an adapter would read as an option"
+        )));
     }
     Ok(())
 }
@@ -66,7 +113,7 @@ impl Store {
     pub fn set_wake_target(
         &self,
         agent: &str,
-        via: WakeVia,
+        via: &WakeVia,
         target: &str,
         auto: bool,
     ) -> Result<Option<WakeTarget>> {
@@ -93,7 +140,7 @@ impl Store {
             )?;
             Ok(Some(WakeTarget {
                 agent: me.address,
-                via,
+                via: via.clone(),
                 target: target.to_string(),
                 auto,
                 updated_at: fmt_ts(tx.now),
@@ -109,16 +156,12 @@ impl Store {
     }
 
     /// Forget an automatically captured target (never a manual one). With `only`, forget it
-    /// only while it still names that adapter and target, so a session ending in one pane
+    /// only while it still names that transport and target, so a session ending in one pane
     /// does not drop the capture a newer session made elsewhere.
-    pub fn clear_auto_wake_target(
-        &self,
-        agent: &str,
-        only: Option<(WakeVia, &str)>,
-    ) -> Result<bool> {
+    pub fn clear_auto_wake_target(&self, agent: &str, only: Option<(&str, &str)>) -> Result<bool> {
         self.write(|tx| {
             let me = resolve_agent(tx, tx.node_id, agent)?;
-            let (via, target) = only.map_or((None, None), |(v, t)| (Some(v.as_str()), Some(t)));
+            let (via, target) = only.map_or((None, None), |(v, t)| (Some(v), Some(t)));
             Ok(tx.execute(
                 "DELETE FROM wake_targets WHERE agent_id = ?1 AND auto = 1
                    AND (?2 IS NULL OR (via = ?2 AND target = ?3))",
@@ -141,10 +184,11 @@ impl Store {
                  JOIN agents a ON a.agent_id = w.agent_id ORDER BY a.address",
             )?;
             let rows = stmt.query_map([], |r| {
-                let via: String = r.get(1)?;
                 Ok(WakeTarget {
                     agent: r.get(0)?,
-                    via: via.parse().unwrap_or(WakeVia::Tmux),
+                    // As stored, with no guess: a name nothing provides is reported by
+                    // `another wake` and `another doctor`.
+                    via: WakeVia(r.get(1)?),
                     target: r.get(2)?,
                     auto: r.get(3)?,
                     updated_at: fmt_ts(r.get(4)?),

@@ -287,6 +287,66 @@ async fn mcp_reap_never_terminates() {
     child.wait().unwrap();
 }
 
+/// Q20: the CLI refuses an endpoint, purpose or `--meta` over its size limit with one line
+/// on standard error that names the field, its size and the limit, and a failing exit code.
+/// Nothing is registered.
+#[test]
+fn oversized_resource_text_and_metadata_are_refused_by_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    setup(home);
+    let endpoint = "x".repeat(another_core::MAX_RESOURCE_ENDPOINT_BYTES + 1);
+    let purpose = "x".repeat(another_core::MAX_RESOURCE_PURPOSE_BYTES + 1);
+    let meta = format!(
+        "blob={}",
+        "x".repeat(another_core::MAX_RESOURCE_METADATA_BYTES)
+    );
+    let mut cases = vec![
+        (
+            "--endpoint",
+            &endpoint,
+            "another: resource endpoint is 2049 bytes; the limit is 2048\n",
+        ),
+        (
+            "--purpose",
+            &purpose,
+            "another: resource purpose is 1025 bytes; the limit is 1024\n",
+        ),
+    ];
+    // A Windows command line holds at most 32,767 characters, so no `--meta` given there
+    // can reach the 64 KiB limit and the process cannot even be started with one.
+    if !cfg!(windows) {
+        cases.push((
+            "--meta",
+            &meta,
+            "another: metadata is 65547 bytes as JSON; the limit is 65536\n",
+        ));
+    }
+    for (flag, value, message) in cases {
+        let out = another(
+            home,
+            &[
+                "resource",
+                "register",
+                "dev_server",
+                "vite@5173",
+                "--agent",
+                "alice",
+                flag,
+                value,
+            ],
+        );
+        assert!(!out.status.success(), "{flag} was accepted");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), message, "{flag}");
+        assert!(out.stdout.is_empty(), "{flag}");
+    }
+    assert_eq!(
+        json(home, &["resources", "--all"]),
+        json!([]),
+        "a refusal registered a resource"
+    );
+}
+
 #[test]
 fn scan_finds_unregistered_listeners() {
     let dir = tempfile::tempdir().unwrap();
@@ -326,4 +386,56 @@ fn scan_finds_unregistered_listeners() {
     );
     assert!(!ours(&json(home, &["orphans"])));
     drop(listener);
+}
+
+/// `another doctor` reads the same findings without the sweep. `another orphans` and
+/// `another reap` keep theirs: a lease that ran out by the clock is expired and recorded
+/// by the listing, and the reap plan counts the grace period from that record.
+#[test]
+fn orphans_and_reap_still_sweep_before_they_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    setup(home);
+    let reg = json(
+        home,
+        &[
+            "resource", "register", "long_job", "eval-run", "--agent", "alice",
+        ],
+    );
+    let id = reg["resource"]["resource_id"].as_str().unwrap().to_string();
+    let db = rusqlite::Connection::open(home.join("another.db")).unwrap();
+    db.execute(
+        "UPDATE resource_leases SET expires_at = 1000 WHERE resource_id = ?1",
+        [&id],
+    )
+    .unwrap();
+    let expired = |db: &rusqlite::Connection| -> i64 {
+        db.query_row(
+            "SELECT count(*) FROM events WHERE kind = 'resource.lease_expired'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(expired(&db), 0);
+
+    let orphans = json(home, &["orphans", "--no-scan"]);
+    assert_eq!(expired(&db), 1, "orphans did not sweep");
+    let list = orphans["orphans"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{orphans}");
+    assert_eq!(list[0]["source"], "lapsed_lease");
+    assert_eq!(list[0]["target"], id.as_str());
+    assert_eq!(list[0]["resource"]["status"], "lapsed");
+    assert!(list[0]["resource"]["lapsed_since"].is_string(), "{orphans}");
+    assert!(list[0]["age_seconds"].as_i64().unwrap() > 600, "{orphans}");
+
+    let plan = json(home, &["reap", &id]);
+    assert_eq!(plan["executed"], false);
+    assert!(plan["age_seconds"].as_i64().unwrap() > 600, "{plan}");
+    let blockers = plan["blockers"].as_array().unwrap();
+    assert_eq!(blockers.len(), 1, "{plan}");
+    assert!(blockers[0]
+        .as_str()
+        .unwrap()
+        .contains("no pid is registered"));
 }

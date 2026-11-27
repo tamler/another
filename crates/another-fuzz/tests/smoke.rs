@@ -56,7 +56,7 @@ fn ingest_raw_smoke() {
     // Valid shapes first, then random bytes.
     for body in [
         r#"{"events":[]}"#,
-        r#"{"events":[{"seq":1,"event_id":"e","node_id":"01FUZZSPOKENODE00000000000","ts":0,"actor":"a","kind":"message.sent","payload":"{}","prev_id":null,"sig":"x"}]}"#,
+        r#"{"events":[{"seq":1,"event_id":"e","node_id":"01FZZSPQKEN0DE000000000000","ts":0,"actor":"a","kind":"message.sent","payload":"{}","prev_id":null,"sig":"x"}]}"#,
         r#"{"events":[{"seq":-1,"event_id":"","node_id":"","ts":9223372036854775807,"actor":"","kind":"","payload":"\u0000","prev_id":"p","sig":""}]}"#,
     ] {
         another_fuzz::ingest_raw(body.as_bytes());

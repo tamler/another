@@ -1,5 +1,6 @@
-//! `another wake` end to end, through the real binary, for every transport: tmux, cmux
-//! (`send` to a surface and `notify`) and Herdr. The fake adapters record each argument
+//! `another wake` end to end, through the real binary, for every transport: Herdr, and the
+//! command transports of the documented example (tmux, cmux `send` to a surface, and cmux
+//! `notify`), read from `transports.json`. The fake adapters record each argument
 //! byte for byte, so a control character that reached an adapter is seen exactly as it
 //! would have been typed. One test drives a real tmux server, so the line discipline of a
 //! real terminal is in the loop as well.
@@ -7,6 +8,9 @@
 //! Nothing here signals or force-stops a process: the fake adapters exit at once, and the
 //! real tmux server runs on a private socket and is shut down with `tmux kill-server`.
 #![cfg(unix)]
+
+#[path = "common/transports.rs"]
+mod transports;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +30,9 @@ printf '%s' '@TOOL@' > "$dir/calls/$n/0"
 i=1
 for a in "$@"; do printf '%s' "$a" > "$dir/calls/$n/$i"; i=$((i+1)); done
 if [ -n "$3" ] && [ -f "$dir/dead/$3" ]; then echo "@TOOL@: can't find pane $3" >&2; exit 1; fi
+if [ '@TOOL@' = herdr ]; then
+  printf '{"id":"cli:agent:prompt","result":{"agent":{"agent_status":"working"},"type":"agent_prompted"}}\n'
+fi
 exit 0
 "#;
 
@@ -68,6 +75,7 @@ impl Env {
             bin,
             _dir: dir,
         };
+        transports::write_example(&env.home);
         env.json(&["agent", "register", "mallory", "--program", "other"]);
         env.json(&["agent", "register", "codex", "--program", "codex"]);
         env.json(&["agent", "register", "claude", "--program", "claude"]);
@@ -196,7 +204,7 @@ fn assert_transport_shape(via: &str, target: &str, calls: &[Vec<String>]) -> Str
             assert_eq!(calls[1], ["tmux", "send-keys", "-t", target, "Enter"]);
             calls[0][5].clone()
         }
-        ("cmux", "notify") => {
+        ("cmux-notify", _) => {
             assert_eq!(calls.len(), 1, "{calls:?}");
             assert_eq!(
                 calls[0][..5],
@@ -218,7 +226,26 @@ fn assert_transport_shape(via: &str, target: &str, calls: &[Vec<String>]) -> Str
         ("herdr", _) => {
             assert_eq!(calls.len(), 1, "{calls:?}");
             assert_eq!(calls[0][..4], ["herdr", "agent", "prompt", target]);
-            assert_eq!(calls[0].len(), 5, "{calls:?}");
+            // The line is one argument; after it come only Herdr's own wait options.
+            assert_eq!(
+                calls[0][5..],
+                [
+                    "--wait",
+                    "--until",
+                    "working",
+                    "--until",
+                    "blocked",
+                    "--until",
+                    "idle",
+                    "--until",
+                    "done",
+                    "--until",
+                    "unknown",
+                    "--timeout",
+                    "8000"
+                ],
+                "{calls:?}"
+            );
             calls[0][4].clone()
         }
         _ => unreachable!(),
@@ -228,7 +255,7 @@ fn assert_transport_shape(via: &str, target: &str, calls: &[Vec<String>]) -> Str
 const TRANSPORTS: [(&str, &str); 4] = [
     ("tmux", "%3"),
     ("cmux", "surface:1"),
-    ("cmux", "notify"),
+    ("cmux-notify", "notify"),
     ("herdr", "codex"),
 ];
 
@@ -257,7 +284,7 @@ fn every_transport_types_a_hostile_message_as_one_clean_line() {
         assert_eq!(plan[0]["message"], expected.as_str(), "{via} {target}");
         let calls = env.calls()[before..].to_vec();
         let typed = assert_transport_shape(via, target, &calls);
-        let want = if via == "cmux" {
+        let want = if via.starts_with("cmux") {
             expected.replace('\\', "/")
         } else {
             expected.clone()
@@ -324,11 +351,13 @@ fn a_failing_adapter_is_reported_and_nothing_more_is_typed() {
     assert_eq!(inbox["unread"], 1, "a failed wake reads nothing: {inbox}");
 }
 
-/// `wake --all` (meant for cron) wakes every agent it can even when one stored pane is
-/// gone: the failure is reported for that agent, the others are still woken and listed,
-/// and the exit status says something failed.
+/// `wake --all` applies the daemon's rules, so it no longer types into targets set by
+/// hand: tmux and cmux cannot say who is in the pane or whether it is busy. It lists each
+/// such agent with the reason, types nothing, and a wake by name still works. A failed
+/// wake by name is recorded with what was known: nothing sent when the first command
+/// failed.
 #[test]
-fn wake_all_keeps_going_past_a_dead_pane() {
+fn wake_all_leaves_hand_set_targets_to_a_wake_by_name() {
     let env = Env::new();
     env.json(&[
         "wake", "set", "--agent", "claude", "--via", "tmux", "--target", "%dead",
@@ -342,43 +371,71 @@ fn wake_all_keeps_going_past_a_dead_pane() {
 
     let out = env.cmd(&["--json", "wake", "--all"]).output().unwrap();
     assert!(
-        !out.status.success(),
-        "one wake failed, so --all does not exit 0"
+        out.status.success(),
+        "nothing was attempted, nothing failed"
     );
-    let plans: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
-        panic!(
-            "--all prints every plan even when one fails ({e}): stdout {:?} stderr {:?}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        )
-    });
+    let plans: Value = serde_json::from_slice(&out.stdout).unwrap();
     let plans = plans.as_array().unwrap();
-    let plan = |agent: &str| plans.iter().find(|p| p["agent"] == agent).unwrap().clone();
-    assert_eq!(plan("codex")["sent"], true, "{plans:?}");
-    assert_eq!(plan("claude")["sent"], false, "{plans:?}");
-    let error = plan("claude")["error"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        error.contains("tmux") && error.contains("exited"),
-        "{plans:?}"
-    );
+    assert_eq!(plans.len(), 2, "{plans:?}");
+    for plan in plans {
+        assert_eq!(plan["sent"], false, "{plans:?}");
+        assert!(
+            plan["skipped"]
+                .as_str()
+                .unwrap()
+                .contains("no session Another can identify"),
+            "{plans:?}"
+        );
+    }
+    assert!(env.calls().is_empty(), "{:?}", env.calls());
+    let text = env.cmd(&["wake", "--all"]).output().unwrap().stdout;
+    let text = String::from_utf8_lossy(&text);
+    assert!(text.contains("skipped codex: no session"), "{text}");
+
+    // By name, each is woken through its stored target; tmux cannot confirm the start.
+    let plan = env.json(&["wake", "--agent", "codex"]);
+    assert_eq!(plan[0]["sent"], true, "{plan}");
+    assert_eq!(plan[0]["outcome"], "unconfirmed");
+    assert_eq!(plan[0]["delivered"], "yes");
+    assert_eq!(plan[0]["started"], "unknown");
+    assert_eq!(plan[0]["failure"], false);
     assert!(
         env.calls()
             .iter()
             .any(|c| c[..4] == ["tmux", "send-keys", "-t", "%7"]),
         "codex's pane was typed into"
     );
+    let out = env
+        .cmd(&["--json", "wake", "--agent", "claude"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a failed wake does not exit 0");
+    let plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan[0]["outcome"], "undelivered", "{plan}");
+    assert_eq!(plan[0]["sent"], false);
+    assert_eq!(plan[0]["failure"], true);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("claude"), "the failure names the agent: {err}");
+    assert!(err.contains("claude") && err.contains("exited"), "{err}");
 
-    // Human output says the same.
-    let out = env.cmd(&["wake", "--all"]).output().unwrap();
-    assert!(!out.status.success());
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("woke codex"), "{text}");
-    assert!(text.contains("failed claude"), "{text}");
+    // Each wake by name left its event and its outcome on a row.
+    let status = env.json(&["transport", "status"]);
+    let rows = status["sessions"].as_array().unwrap();
+    let row = |agent: &str| rows.iter().find(|r| r["agent"] == agent).unwrap().clone();
+    assert_eq!(row("codex")["transport"], "tmux");
+    assert_eq!(row("codex")["last_wake_outcome"], "unconfirmed");
+    assert_eq!(row("codex")["hook_made"], false);
+    assert_eq!(row("claude")["last_wake_outcome"], "undelivered");
+    let human = env
+        .cmd(&["wake", "--agent", "codex"])
+        .output()
+        .unwrap()
+        .stdout;
+    let human = String::from_utf8_lossy(&human);
+    assert!(
+        human.contains("delivered, not confirmed")
+            && human.contains("tmux cannot report whether the agent started"),
+        "{human}"
+    );
 }
 
 // ---------------------------------------------------------------------------

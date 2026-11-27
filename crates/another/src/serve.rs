@@ -39,8 +39,9 @@ pub struct HttpOptions {
     /// Address actually bound, so the dashboard can accept that exact `Host`.
     /// `127.0.0.1`, `localhost`, and `[::1]` are always allowed as well.
     pub dashboard_bound: Option<SocketAddr>,
-    /// Run the push waker this often (wake idle Herdr agents with unannounced mail).
-    /// `None` turns it off; only the local loopback daemon should run one.
+    /// Run the waker this often (sweep the transports, wake idle sessions with unannounced
+    /// mail). `None` turns off every transport call; only the local loopback daemon should
+    /// run one.
     pub push_every: Option<Duration>,
 }
 
@@ -71,7 +72,8 @@ pub fn check_bind(addr: &str, opts: &HttpOptions) -> Result<SocketAddr> {
     )
 }
 
-/// Periodically expire holds and stale requests until cancelled.
+/// Periodically expire holds and stale requests, and release queue claims past the grace
+/// period, until cancelled.
 pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(every);
@@ -79,8 +81,8 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
             tokio::select! {
                 _ = ct.cancelled() => break,
                 _ = tick.tick() => {
-                    let store = store.clone();
-                    match tokio::task::spawn_blocking(move || store.sweep()).await {
+                    let sweeper = store.clone();
+                    match tokio::task::spawn_blocking(move || sweeper.sweep()).await {
                         Ok(Ok(r)) if r.expired_holds + r.stale_requests > 0 => tracing::info!(
                             expired_holds = r.expired_holds,
                             stale_requests = r.stale_requests,
@@ -90,18 +92,28 @@ pub fn spawn_sweeper(store: Store, every: Duration, ct: CancellationToken) {
                         Ok(Err(e)) => tracing::warn!(error = %e, "sweep failed"),
                         Err(e) => tracing::warn!(error = %e, "sweep task failed"),
                     }
+                    let sweeper = store.clone();
+                    match tokio::task::spawn_blocking(move || sweeper.queue_sweep()).await {
+                        Ok(Ok(r)) if !r.released_claims.is_empty() => tracing::info!(
+                            released_claims = r.released_claims.len(),
+                            "queue sweep"
+                        ),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::warn!(error = %e, "queue sweep failed"),
+                        Err(e) => tracing::warn!(error = %e, "queue sweep task failed"),
+                    }
                 }
             }
         }
     });
 }
 
-/// How often the waker also drops wake targets that can no longer be reached.
+/// How often the waker also drops wake targets and session rows that have aged out.
 const PRUNE_EVERY: Duration = Duration::from_secs(600);
 
-/// Run the push waker (see [`crate::wake::Waker`]) and periodic target pruning until
-/// cancelled. Each pass runs on the blocking pool, since it touches SQLite and may start
-/// a `herdr` process.
+/// Run the waker (see [`crate::wake::Waker`]): the transport sweep when it is due, the
+/// wake pass, and periodic pruning, on one task until cancelled. Each pass runs on the
+/// blocking pool, since it touches SQLite and may start a transport process.
 pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
     let first = crate::wake::Waker::new();
     // On shutdown, tell a pass in progress to stop its adapter commands now; the blocking
@@ -124,7 +136,7 @@ pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
                     let Some(mut w) = waker.take() else { break };
                     let store = store.clone();
                     match tokio::task::spawn_blocking(move || {
-                        let out = w.tick(&store);
+                        let out = w.run(&store);
                         (w, out)
                     })
                     .await
@@ -134,6 +146,10 @@ pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
                             match out {
                                 Ok(events) => {
                                     for e in events {
+                                        if e.action == crate::wake::CONFIG_REFUSED {
+                                            tracing::warn!(detail = %e.detail, "transports config refused");
+                                            continue;
+                                        }
                                         tracing::info!(
                                             agent = %e.agent,
                                             target = %e.target,
@@ -157,7 +173,7 @@ pub fn spawn_waker(store: Store, every: Duration, ct: CancellationToken) {
                     match tokio::task::spawn_blocking(move || crate::wake::prune(&store, false)).await {
                         Ok(Ok(rows)) => {
                             for r in rows.iter().filter(|r| r.pruned) {
-                                tracing::info!(agent = %r.agent, target = %r.target, reason = %r.reason, "wake target pruned");
+                                tracing::info!(agent = %r.agent, target = %r.target, session = r.session_id.as_deref().unwrap_or(""), reason = %r.reason, "pruned");
                             }
                         }
                         Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "prune failed"),
@@ -198,6 +214,12 @@ pub async fn serve_stdio(store: Store, sweep_every: Duration) -> Result<()> {
     Ok(())
 }
 
+/// Largest request body a route reads through an axum extractor, unless the route states
+/// its own: the value the HTTP library applied by default before D99, now stated. It covers
+/// the OAuth and dashboard POST routes and `/fed/pair`. `/mcp` is served by the MCP
+/// library, which reads its own body, and is not covered.
+pub const HTTP_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
 /// Build the HTTP app: MCP at `/mcp`, the activity feed at `GET /activity`, and
 /// `GET /health`. With `auth`, `/mcp` and `/activity` require a bearer token.
 pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> axum::Router {
@@ -221,6 +243,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         .nest_service("/mcp", mcp)
         .route("/activity", axum::routing::get(crate::remote::activity))
         .with_state(store.clone());
+    let federation_only = opts.federation && !opts.auth;
+    let protected = if federation_only {
+        axum::Router::new()
+    } else {
+        protected
+    };
     let protected = if opts.auth {
         protected.layer(axum::middleware::from_fn_with_state(
             store.clone(),
@@ -236,7 +264,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
     };
     let node_id = store.node_id().to_string();
     let auth = opts.auth;
-    let dashboard = opts.dashboard.as_str().to_string();
+    let dashboard_mode = if federation_only {
+        crate::dashboard::DashboardMode::Off
+    } else {
+        opts.dashboard
+    };
+    let dashboard = dashboard_mode.as_str().to_string();
     let mut app = protected.route(
         "/health",
         axum::routing::get(move || {
@@ -252,25 +285,29 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
             }
         }),
     );
-    if opts.auth {
-        let ctx = crate::oauth_http::AuthContext {
-            oauth: opts.oauth.clone(),
-        };
-        if opts.oauth.is_some() {
-            app = app.merge(crate::oauth_http::router().with_state(store.clone()));
-        }
-        app = app.layer(axum::Extension(ctx));
+    if opts.auth && opts.oauth.is_some() {
+        app = app.merge(crate::oauth_http::router().with_state(store.clone()));
     }
-    // Mounted after the auth layer, same as /health, so a token is never required.
-    // Actions and message bodies are still withheld unless the mode is local.
-    // The edge guard below still applies. The dashboard router adds its own
-    // loopback Host and bound-port Origin checks on top of that.
-    if opts.dashboard.enabled() {
-        app = app.merge(crate::dashboard::router(
-            store,
-            opts.dashboard,
-            opts.dashboard_bound,
-        ));
+    // Federation-only listeners have no dashboard. With federation and auth it
+    // requires a token; other listeners retain the existing dashboard policy.
+    // The dashboard also enforces loopback Host and bound-port Origin checks.
+    if dashboard_mode.enabled() {
+        let dashboard =
+            crate::dashboard::router(store.clone(), dashboard_mode, opts.dashboard_bound);
+        let dashboard = if opts.federation && opts.auth {
+            dashboard.layer(axum::middleware::from_fn_with_state(
+                store,
+                crate::remote::require_token,
+            ))
+        } else {
+            dashboard
+        };
+        app = app.merge(dashboard);
+    }
+    if opts.auth {
+        app = app.layer(axum::Extension(crate::oauth_http::AuthContext {
+            oauth: opts.oauth.clone(),
+        }));
     }
     // DNS-rebinding checks run for unauthenticated loopback too, not only `--auth`.
     let guard = crate::oauth_http::EdgeGuard::from_http(
@@ -278,10 +315,12 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
         &opts.allowed_hosts,
         opts.oauth.as_ref(),
     );
-    app.layer(axum::middleware::from_fn(move |req, next| {
-        let guard = guard.clone();
-        async move { enforce_edge(guard, req, next).await }
-    }))
+    // `/fed/push` states its own, larger limit on its route, which wins over this one.
+    app.layer(axum::extract::DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let guard = guard.clone();
+            async move { enforce_edge(guard, req, next).await }
+        }))
 }
 
 /// `Host` on every route, and `Origin` on state-changing requests that send one.
@@ -292,7 +331,7 @@ async fn enforce_edge(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = req.uri().path();
-    if path.starts_with("/fed") {
+    if path.starts_with("/fed/") {
         return next.run(req).await;
     }
     let host_ok = req
@@ -386,6 +425,9 @@ pub async fn serve_http(
         opts.auth,
         opts.dashboard_flag,
     )?;
+    if opts.federation && !opts.auth {
+        opts.dashboard = crate::dashboard::DashboardMode::Off;
+    }
     let ct = CancellationToken::new();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -414,10 +456,17 @@ pub async fn serve_http(
     } else {
         ""
     };
-    eprintln!(
-        "another: MCP (streamable HTTP) on http://{local}/mcp{auth_note}, node {}",
-        store.node_id()
-    );
+    if opts.federation && !opts.auth {
+        eprintln!(
+            "another: federation-only HTTP on http://{local}, node {}",
+            store.node_id()
+        );
+    } else {
+        eprintln!(
+            "another: MCP (streamable HTTP) on http://{local}/mcp{auth_note}, node {}",
+            store.node_id()
+        );
+    }
     if let Some(oauth) = &opts.oauth {
         eprintln!("another: hosted apps connect to {}", oauth.resource);
         eprintln!(

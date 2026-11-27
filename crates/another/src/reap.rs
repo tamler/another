@@ -37,6 +37,21 @@ pub struct OrphanReport {
 /// registered resource accounts for.
 pub fn orphans(store: &Store, scan_listeners: bool) -> another_core::Result<OrphanReport> {
     let registered = store.find_resources(ResourceFilter::default())?;
+    orphans_among(store, registered, scan_listeners)
+}
+
+/// [`orphans`] for `another doctor`, which must change nothing: the same findings from the
+/// same scan, read without the sweep (`Store::resources_unswept`).
+pub fn orphans_unswept(store: &Store) -> another_core::Result<OrphanReport> {
+    let registered = store.resources_unswept(ResourceFilter::default())?;
+    orphans_among(store, registered, true)
+}
+
+fn orphans_among(
+    store: &Store,
+    registered: Vec<Resource>,
+    scan_listeners: bool,
+) -> another_core::Result<OrphanReport> {
     let mut orphans = Vec::new();
     for r in registered.iter().filter(|r| r.status == "lapsed") {
         orphans.push(Orphan {
