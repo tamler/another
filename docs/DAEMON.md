@@ -156,7 +156,7 @@ another stats --since 48h
 another --json stats --since 48h
 ```
 
-`another stats` counts this node's coordination evidence from the event log for a period (a duration such as `30m`, `48h` or `2d`, an RFC 3339 time, or an event id; the default is `24h`):
+`another stats` counts this node's coordination evidence from the event log for a period (bare seconds such as `3600`, a duration such as `30m`, `48h` or `2d`, an RFC 3339 time, or an event id; the default is `24h`):
 
 | Count | From |
 |---|---|

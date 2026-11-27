@@ -30,6 +30,24 @@ fn json(home: &Path, args: &[&str]) -> Value {
 }
 
 #[test]
+fn since_accepts_bare_seconds_and_describes_them_in_invalid_input_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("h");
+    json(&home, &["init"]);
+    for command in ["activity", "stats", "board"] {
+        json(&home, &[command, "--since", "3600"]);
+        let help = another(&home, &[command, "--help"]);
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("bare seconds"));
+    }
+    let out = another(&home, &["activity", "--since", "nonsense"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(
+        "invalid since \"nonsense\": use a duration like 3600 (bare seconds), 90m or 2h, an RFC 3339 time, or an event id"
+    ));
+}
+
+#[test]
 fn init_creates_home_with_node() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("h");
