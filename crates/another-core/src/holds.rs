@@ -1898,15 +1898,28 @@ impl Store {
                     a.agent_id IS NULL OR p.project_id IS NULL OR hn.node_id IS NULL
                     OR an.node_id IS NULL OR pn.node_id IS NULL
                     OR h.node_id != a.node_id OR h.node_id != p.node_id)";
-            let count: i64 = conn.query_row(&format!("SELECT count(*) {from}"), [], |r| r.get(0))?;
-            let mut stmt = conn.prepare(&format!("SELECT h.hold_id,
+            let count: i64 =
+                conn.query_row(&format!("SELECT count(*) {from}"), [], |r| r.get(0))?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT h.hold_id,
                 h.node_id || CASE WHEN hn.node_id IS NULL THEN ' (missing node)' ELSE '' END,
                 CASE WHEN a.agent_id IS NULL THEN 'missing agent'
                      WHEN an.node_id IS NULL THEN a.node_id || ' (missing node)' ELSE a.node_id END,
                 CASE WHEN p.project_id IS NULL THEN 'missing project'
                      WHEN pn.node_id IS NULL THEN p.node_id || ' (missing node)' ELSE p.node_id END
-                {from} ORDER BY h.hold_id LIMIT ?1"))?;
-            let lines = stmt.query_map([limit.min(i64::MAX as usize) as i64], |r| Ok(format!("hold {} (node {}, agent node {}, project node {})", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                {from} ORDER BY h.hold_id LIMIT ?1"
+            ))?;
+            let lines = stmt
+                .query_map([limit.min(i64::MAX as usize) as i64], |r| {
+                    Ok(format!(
+                        "hold {} (node {}, agent node {}, project node {})",
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok((count as usize, lines))
         })
     }
