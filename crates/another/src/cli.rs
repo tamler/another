@@ -144,7 +144,8 @@ pub enum Command {
         /// and body; `--template list` shows them and their fields. Implies --request.
         #[arg(long)]
         template: Option<String>,
-        /// A template field as key=value (repeatable), e.g. --field target="PR #170".
+        /// A template field as key=value (repeatable). Keys are trimmed, nonempty and unique;
+        /// malformed or duplicate entries are usage errors (exit 2).
         #[arg(long = "field", value_name = "KEY=VALUE", requires = "template")]
         fields: Vec<String>,
         #[arg(long, short = 'i', default_value = "normal")]
@@ -721,7 +722,8 @@ pub enum ResourceCmd {
         /// Lease seconds (default 1800, max 86400).
         #[arg(long)]
         ttl: Option<i64>,
-        /// Metadata as key=value (repeatable), e.g. --meta model=llama3 --meta backend=metal.
+        /// Metadata as key=value (repeatable). Keys are trimmed, nonempty and unique;
+        /// malformed or duplicate entries are usage errors (exit 2). Values are kept as given.
         #[arg(long = "meta", value_name = "KEY=VALUE")]
         meta: Vec<String>,
     },
@@ -1840,13 +1842,10 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ttl,
             meta,
         }) => {
-            let mut metadata = serde_json::Map::new();
-            for kv in meta {
-                let (k, v) = kv
-                    .split_once('=')
-                    .ok_or_else(|| anyhow::anyhow!("--meta expects KEY=VALUE, got {kv:?}"))?;
-                metadata.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-            }
+            let metadata = crate::templates::parse_key_values(&meta, "--meta")?
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
             let project = project
                 .map(|p| project_key(&store, &agent.agent, Some(p)))
                 .transpose()?;
