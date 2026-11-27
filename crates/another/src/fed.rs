@@ -517,11 +517,56 @@ fn agent_for(url: &str) -> ureq::Agent {
         .any(|p| url.starts_with(p));
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(30)));
     if loopback {
         config = config.proxy(None);
     }
     ureq::Agent::new_with_config(config.build())
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn hub_client_disables_redirects() {
+        assert_eq!(
+            agent_for("http://127.0.0.1:7466").config().max_redirects(),
+            0
+        );
+    }
+
+    #[test]
+    fn hub_redirect_is_not_followed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let target = destination.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert!(request.len() < 8192);
+                assert!(reader.read_line(&mut request).unwrap() > 0);
+            }
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://{target}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let result = agent_for(&url).get(&format!("{url}/fed/pull")).call();
+        server.join().unwrap();
+        assert!(
+            matches!(destination.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "redirect destination received a connection"
+        );
+        assert_eq!(result.unwrap().status(), 302);
+    }
 }
 
 /// A sync request or answer that was over a size limit of the other side or of this one.
