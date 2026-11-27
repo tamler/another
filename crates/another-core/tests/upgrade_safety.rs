@@ -1355,3 +1355,222 @@ fn upgrade_drops_cross_checkout_blocks() {
     assert_eq!(stopped.conflicts[0].held.agent, "bob");
     assert_eq!(src_row(&db), (key, a_real));
 }
+
+/// D104 / schema v14: a v13 home keeps its queue rows, the pre-migration backup is a
+/// complete v13 database (the rollback copy), and a keyed delegate can then admit a
+/// security item that the v13 CHECK would have refused.
+#[test]
+fn a_v13_home_upgrades_and_a_delegate_can_admit_a_security_item() {
+    assert_eq!(
+        current(),
+        14,
+        "this test is the v13-to-v14 upgrade; recheck the schema number at merge"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let store = Store::open(&home).unwrap();
+    for name in ["ann", "arch"] {
+        store
+            .register_agent(RegisterAgent {
+                name: name.into(),
+                program: Program::Claude,
+                project: None,
+                model: None,
+                description: None,
+            })
+            .unwrap();
+    }
+    let made = store
+        .queue_delegate_add(&QueueCaller::Owner, "arch")
+        .unwrap();
+    let arch = QueueCaller::Agent {
+        agent: "arch".into(),
+        admit_key: Some(made.key),
+    };
+    let proposed = store
+        .queue_propose(
+            &QueueCaller::agent("ann"),
+            ProposeItem {
+                title: "a leak".into(),
+                kind: QueueKind::Security,
+                scope: Some("M1".into()),
+                done_when: Some("the leak is closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let work = store
+        .queue_propose(
+            &QueueCaller::agent("ann"),
+            ProposeItem {
+                title: "ordinary work".into(),
+                scope: Some("M1".into()),
+                done_when: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .queue_admit(&arch, &work.label, AdmitItem::default())
+        .unwrap();
+    let by_owner = store
+        .queue_propose(
+            &QueueCaller::agent("ann"),
+            ProposeItem {
+                title: "owner-admitted leak".into(),
+                kind: QueueKind::Security,
+                scope: Some("M1".into()),
+                done_when: Some("closed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .queue_admit(&QueueCaller::Owner, &by_owner.label, AdmitItem::default())
+        .unwrap();
+    let work_seq = work.seq;
+    let proposed_label = proposed.label.clone();
+    let work_label = work.label.clone();
+    let by_owner_label = by_owner.label.clone();
+    drop(store);
+
+    let db_path = home.join(DB_FILE);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        r#"
+CREATE TABLE queue_items_v13 (
+    seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id         TEXT NOT NULL UNIQUE,
+    node_id         TEXT NOT NULL REFERENCES nodes(node_id),
+    state           TEXT NOT NULL CHECK (state IN ('proposed','ready','claimed','done')),
+    kind            TEXT NOT NULL CHECK (kind IN ('work','security','data_loss')),
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL DEFAULT '',
+    scope           TEXT,
+    done_condition  TEXT,
+    priority        INTEGER NOT NULL DEFAULT 2 CHECK (priority IN (1, 2)),
+    for_agent       TEXT REFERENCES agents(agent_id),
+    skip_agent      TEXT REFERENCES agents(agent_id),
+    proposed_by     TEXT REFERENCES agents(agent_id),
+    proposed_at     INTEGER NOT NULL,
+    admit_authority TEXT CHECK (admit_authority IN ('owner','delegate')),
+    admitted_by     TEXT REFERENCES agents(agent_id),
+    admitted_at     INTEGER,
+    claimer_id      TEXT REFERENCES agents(agent_id),
+    claimed_at      INTEGER,
+    claim_session   TEXT,
+    outcome         TEXT CHECK (outcome IN ('completed','rejected')),
+    result_summary  TEXT,
+    result_kind     TEXT CHECK (result_kind IN ('pr','commit','file')),
+    result_ref      TEXT,
+    closed_by       TEXT REFERENCES agents(agent_id),
+    closed_at       INTEGER,
+    updated_at      INTEGER NOT NULL,
+    CHECK (state NOT IN ('ready','claimed') OR (admit_authority IS NOT NULL
+           AND admitted_at IS NOT NULL AND scope IS NOT NULL AND done_condition IS NOT NULL)),
+    CHECK (admit_authority IS NULL OR (admit_authority = 'delegate') = (admitted_by IS NOT NULL)),
+    CHECK (kind = 'work' OR admit_authority IS NULL OR admit_authority = 'owner'),
+    CHECK ((state = 'claimed') = (claimer_id IS NOT NULL)),
+    CHECK ((state = 'done') = (outcome IS NOT NULL)),
+    CHECK (outcome IS NOT 'completed' OR (result_summary IS NOT NULL
+           AND result_kind IS NOT NULL AND result_ref IS NOT NULL AND admitted_at IS NOT NULL))
+);
+INSERT INTO queue_items_v13 SELECT * FROM queue_items;
+DROP TABLE queue_items;
+ALTER TABLE queue_items_v13 RENAME TO queue_items;
+CREATE INDEX queue_ready   ON queue_items(state, priority, admitted_at, seq);
+CREATE INDEX queue_claimed ON queue_items(claimer_id) WHERE state = 'claimed';
+"#,
+    )
+    .unwrap();
+    db.pragma_update(None, "user_version", 13).unwrap();
+    let sql: String = db
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'queue_items'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        sql.contains("kind = 'work' OR admit_authority IS NULL OR admit_authority = 'owner'"),
+        "the fixture is a true v13 table: {sql}"
+    );
+    let err = db
+        .execute(
+            "UPDATE queue_items SET kind = 'security' WHERE seq = ?1",
+            [work_seq],
+        )
+        .expect_err("v13 refuses a delegate-admitted security row");
+    assert!(err.to_string().contains("CHECK"), "{err}");
+    drop(db);
+    assert_eq!(version(&db_path), 13);
+
+    let store = Store::open(&home).unwrap();
+    assert_eq!(version(&db_path), 14);
+    let kept = backups(&home);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(version(&kept[0]), 13, "the backup is the v13 home");
+    let backup_sql: String = Connection::open(&kept[0])
+        .unwrap()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'queue_items'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        backup_sql
+            .contains("kind = 'work' OR admit_authority IS NULL OR admit_authority = 'owner'"),
+        "the rollback copy still has the v13 CHECK: {backup_sql}"
+    );
+    assert_eq!(
+        store.queue_item(&proposed_label).unwrap().state,
+        QueueState::Proposed
+    );
+    assert_eq!(store.queue_item(&work_label).unwrap().kind, QueueKind::Work);
+    assert_eq!(
+        store.queue_item(&by_owner_label).unwrap().kind,
+        QueueKind::Security
+    );
+    let after = Connection::open(&db_path).unwrap();
+    let after_sql: String = after
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'queue_items'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !after_sql
+            .contains("kind = 'work' OR admit_authority IS NULL OR admit_authority = 'owner'"),
+        "v14 drops the owner-only CHECK: {after_sql}"
+    );
+    after
+        .execute(
+            "UPDATE queue_items SET kind = 'security' WHERE seq = ?1",
+            [work_seq],
+        )
+        .unwrap();
+    drop(after);
+    let admitted = store
+        .queue_admit(
+            &arch,
+            &proposed_label,
+            AdmitItem {
+                reason: Some("the leak is real".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(admitted.state, QueueState::Ready);
+    assert_eq!(admitted.admitted.as_ref().unwrap().authority, "delegate");
+    let list = store.queue_needs_owner().unwrap();
+    assert_eq!(
+        list.admitted_by_delegate
+            .recent
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect::<Vec<_>>(),
+        [proposed_label.as_str()]
+    );
+}
