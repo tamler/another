@@ -117,6 +117,32 @@ fn missing_identity_and_unknown_shell_refuse_without_name_authority() {
         .any(|l| l.subject_kind == SubjectKind::File));
 }
 
+/// PR #296 review P2: a tool Another does not know is refused even when it carries a
+/// familiar path key, because its other fields may name more targets.
+#[test]
+fn an_unknown_write_tool_with_a_familiar_path_key_is_refused() {
+    let f = Fixture::new();
+    let out = f.event(
+        Client::Claude,
+        HookEvent::PreEdit,
+        json!({"session_id":"root", "tool_use_id":"unknown-call", "tool_name":"UnknownWriteTool", "tool_input":{"file_path":"A", "other_target":"B"}}),
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["hookSpecificOutput"]["permissionDecision"],
+        "deny",
+        "{out}"
+    );
+    assert!(out.contains("NO_CALL_CONTEXT"), "{out}");
+    assert!(!f
+        .store
+        .right_leases()
+        .unwrap()
+        .iter()
+        .any(|l| l.subject_kind == SubjectKind::File));
+    // A known write tool with the same path is still admitted.
+    assert!(f.pre("root", None, "known-call", "A").is_empty());
+}
+
 #[test]
 fn exact_completion_renews_b_but_denial_and_presence_do_not_renew_a() {
     let f = Fixture::new();

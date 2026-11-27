@@ -45,7 +45,7 @@ fn lease(v: &Value, kind: &str) -> LeaseRef {
 
 /// One round of history: a hold, a resource borrow, a queue claim finished and a request
 /// claim, each through the contract, and each ended.
-fn round(store: &Store, actor: &ActorProof, project: &str, i: usize) {
+fn round(store: &Store, actor: &ActorProof, recipient: &str, project: &str, i: usize) {
     let held = act(
         store,
         actor,
@@ -135,7 +135,7 @@ fn round(store: &Store, actor: &ActorProof, project: &str, i: usize) {
         .unguarded_repair()
         .send_message(SendMessage {
             from: "operator".into(),
-            to: vec!["root".into()],
+            to: vec![recipient.into()],
             subject: format!("ask {i}"),
             request: Some(NewRequest::default()),
             ..Default::default()
@@ -202,7 +202,7 @@ fn sync_projections_cost_does_not_grow_with_ended_history() {
     let mut done = 0;
     for target in [0usize, 250, 1000, 2500] {
         while done < target {
-            round(&store, &actor.proof, &project, done);
+            round(&store, &actor.proof, &actor.actor.name, &project, done);
             done += 1;
         }
         let projections = store.right_leases().unwrap().len();
