@@ -107,8 +107,8 @@ impl Limits {
 }
 
 /// Whether one side of a sync speaks the signed exchange. Every build from this one on
-/// does, and nothing in the program chooses otherwise; `Unsigned` is kept so the tests can
-/// run a node of this build against one of an older build.
+/// does, and nothing in the program chooses otherwise. Tests and the `test-support`
+/// feature also allow unsigned exchange to simulate an older build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exchange {
     /// A spoke sends a nonce and applies only an answer the hub signed for its request; a
@@ -116,6 +116,7 @@ pub enum Exchange {
     Signed,
     /// What a build before signed answers did: a spoke sends no nonce and checks no
     /// answer; a hub asks for no nonce, signs no answer and records no contact.
+    #[cfg(any(test, feature = "test-support"))]
     Unsigned,
 }
 
@@ -396,6 +397,7 @@ async fn push(
             Ok(nonce) => Some(nonce),
             Err(r) => return *r,
         },
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
     let req: PushRequest = match serde_json::from_slice(&body) {
@@ -425,8 +427,8 @@ async fn push(
 /// signed with this hub's key for the request (its nonce and the text of its signature
 /// header), and the same bytes sent. The spoke's contact time is written once the answer
 /// is built; if that write fails the answer is still sent, since it is correct and the
-/// spoke must not repeat an exchange that succeeded. Without a nonce, which only
-/// [`Exchange::Unsigned`] allows, the answer is what an older build sent.
+/// spoke must not repeat an exchange that succeeded. Without a nonce, which only the
+/// test-only unsigned exchange allows, the answer is what an older build sent.
 async fn answer<T: Serialize>(
     store: &Store,
     node: String,
@@ -480,6 +482,7 @@ async fn pull(
             Ok(nonce) => Some(nonce),
             Err(r) => return *r,
         },
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
     let mut after = 0i64;
@@ -601,7 +604,7 @@ fn read<T: serde::de::DeserializeOwned>(
 /// A push or pull that was sent, with what its answer is checked against.
 struct Sent {
     resp: ureq::http::Response<ureq::Body>,
-    /// The nonce sent with the request; `None` only as [`Exchange::Unsigned`].
+    /// The nonce sent with the request; `None` only for the test-only unsigned exchange.
     nonce: Option<String>,
     /// The text of the request's signature header.
     signature: String,
@@ -622,6 +625,7 @@ fn signed(
     // signature: the hub signs it into its answer.
     let nonce = match to.exchange {
         Exchange::Signed => Some(another_core::crypto::request_nonce()?),
+        #[cfg(any(test, feature = "test-support"))]
         Exchange::Unsigned => None,
     };
     let url = format!("{}{path_and_query}", base.trim_end_matches('/'));
