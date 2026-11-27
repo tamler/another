@@ -212,6 +212,12 @@ fn claude_install_preserves_existing_config_and_is_idempotent() {
     let script = env.another_home.join("hooks/another-hook.sh");
     let text = std::fs::read_to_string(&script).unwrap();
     assert!(text.starts_with("#!/bin/sh"));
+    assert!(
+        !text.contains("command -v another"),
+        "PATH search can pick a hijacked another"
+    );
+    assert!(text.contains("$HOME/.local/bin/another"));
+    assert!(text.contains("$HOME/.cargo/bin/another"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

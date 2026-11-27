@@ -90,7 +90,7 @@ impl DaemonEnv {
                 .map(PathBuf::from)
                 .filter(|p| p.is_absolute()),
             another_home,
-            exe: std::env::current_exe().context("locating the another binary")?,
+            exe: crate::bin_path::resolve_current_exe()?,
             path: non_empty("PATH"),
             user,
             label,
