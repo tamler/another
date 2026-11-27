@@ -4,14 +4,14 @@
 
 use another_core::test_support::{older_home as make_older_home, schema_version as version};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+#[path = "common/cli.rs"]
+mod cli;
 
 fn another(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_another"))
+    cli::another_cmd(home)
         .args(args)
-        .env("ANOTHER_HOME", home)
-        .env_remove("ANOTHER_AGENT")
-        .env_remove("ANOTHER_LOG")
         .stdin(Stdio::null())
         .output()
         .expect("run another")
@@ -87,13 +87,10 @@ fn a_refused_home_keeps_hooks_quiet_and_logs_the_true_reason_once() {
     std::fs::create_dir_all(&user).unwrap();
 
     for event in ["session-start", "prompt", "pre-edit", "post-tool", "prompt"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_another"))
+        let out = cli::another_cmd(&home)
             .args(["hook", "run", event, "--client", "claude"])
-            .env("ANOTHER_HOME", &home)
             .env("HOME", &user)
             .env("USERPROFILE", &user)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_LOG")
             .stdin(Stdio::null())
             .output()
             .expect("run another");

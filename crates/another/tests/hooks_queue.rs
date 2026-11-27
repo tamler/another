@@ -9,6 +9,9 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
 
 use another_core::now_ms;
+#[path = "common/cli.rs"]
+mod cli;
+
 use another_core::{
     AdmitItem, EditItem, ProposeItem, QueueCaller, QueueItem, QueueState, Store, DB_FILE,
 };
@@ -89,20 +92,8 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_another"));
-        c.args(args)
-            .env("HOME", &self.home)
-            .env("ANOTHER_HOME", &self.another_home)
-            .env_remove("ANOTHER_AGENT")
-            .env_remove("ANOTHER_ADMIT_KEY")
-            .env_remove("GROK_HOOK_EVENT")
-            .env_remove("ANOTHER_LOG")
-            // Tests may run inside a multiplexer; keep its pane out of the session rows.
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("HERDR_BIN_PATH")
-            .env_remove("TMUX_PANE")
-            .env_remove("CMUX_SURFACE_ID")
-            .env_remove("TERM_PROGRAM");
+        let mut c = cli::another_cmd(&self.another_home);
+        c.args(args).env("HOME", &self.home);
         c
     }
 

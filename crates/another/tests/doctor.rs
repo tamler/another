@@ -1032,6 +1032,56 @@ mod orphan_scan {
         assert_eq!(detail(&r, "listeners"), "none unregistered (lsof)", "{r}");
     }
 
+    #[test]
+    fn foreign_resources_cannot_hide_local_listeners() {
+        let fx = Fx::with_agent();
+        fx.ok(&[
+            "resource",
+            "register",
+            "dev_server",
+            "vite@5173",
+            "--agent",
+            "alice",
+        ]);
+        let db = rusqlite::Connection::open(fx.db()).unwrap();
+        db.execute(
+            "INSERT INTO nodes (node_id, display_name, created_at) VALUES (?1, 'other-box', 1)",
+            [OTHER],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE resources SET node_id = ?1, pid = 4000000001",
+            [OTHER],
+        )
+        .unwrap();
+        // One matches only the foreign pid, the other only its port.
+        let path =
+            fx.fake_lsof("p4000000001\ncnode\nLme\nn*:9000\np4000000002\ncnode\nLme\nn*:5173\n");
+        let (_, report) = fx.doctor_json_on_path(&path);
+        assert!(
+            detail(&report, "listeners").starts_with("2 unregistered"),
+            "{report}"
+        );
+        let output = fx.on_path(&path, &["--json", "orphans"]);
+        assert!(output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let listeners: Vec<_> = report["orphans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["source"] == "unregistered_listener")
+            .collect();
+        assert_eq!(listeners.len(), 2, "{report}");
+        let output = fx.on_path(&path, &["--json", "reap", "pid:4000000001"]);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            !report
+                .to_string()
+                .contains("belongs to a registered resource"),
+            "{report}"
+        );
+    }
+
     /// More than five of either: the count is the whole number, five are named.
     #[test]
     fn only_five_of_each_are_named() {
