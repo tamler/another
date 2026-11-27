@@ -214,7 +214,7 @@ fn slug_base(abs_path: &str) -> String {
     }
 }
 
-fn project_from_row(r: &Row<'_>) -> rusqlite::Result<Project> {
+pub(crate) fn project_from_row(r: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         project_id: r.get(0)?,
         node_id: r.get(1)?,

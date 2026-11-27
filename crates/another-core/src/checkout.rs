@@ -17,11 +17,10 @@ use crate::holds::{
     folds_case, hold_covers, is_repo_wide, link_unlinked, literal_pattern, literal_prefix,
     normalize_pattern, release_tx, sweep_tx, Hold, HoldFilter,
 };
-use crate::identity::{find_project, resolve_agent, Project};
+use crate::identity::{find_project, project_from_row, resolve_agent, Project};
 use crate::mail::touch;
 use crate::repo::{checkout_of, lexical, link_of, resolve_existing};
 use crate::store::{Store, Tx};
-use crate::time::fmt_ts;
 use crate::tokens::{scope_allows_project, TokenScope};
 
 /// A path as a slash-separated string, the way hold patterns spell one.
@@ -236,15 +235,7 @@ fn local_projects(tx: &Tx<'_>) -> Result<Vec<Project>> {
          WHERE node_id = ?1 ORDER BY abs_path",
     )?;
     let projects = stmt
-        .query_map([tx.node_id], |r| {
-            Ok(Project {
-                project_id: r.get(0)?,
-                node_id: r.get(1)?,
-                abs_path: r.get(2)?,
-                slug: r.get(3)?,
-                created_at: fmt_ts(r.get(4)?),
-            })
-        })?
+        .query_map([tx.node_id], project_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(projects)
 }
@@ -252,8 +243,8 @@ fn local_projects(tx: &Tx<'_>) -> Result<Vec<Project>> {
 /// The caller's live holds on this node, in projects `scope` may see (all of them locally).
 fn own_holds(tx: &Tx<'_>, agent_id: &str, scope: Option<&TokenScope>) -> Result<Vec<OwnHold>> {
     let mut stmt = tx.prepare(
-        "SELECT h.hold_id, h.pattern, p.project_id, p.node_id, p.abs_path, p.slug, p.created_at,
-           coalesce(pr.checkout, '')
+        "SELECT p.project_id, p.node_id, p.abs_path, p.slug, p.created_at,
+           h.hold_id, h.pattern, coalesce(pr.checkout, '')
          FROM holds h JOIN projects p ON p.project_id = h.project_id
          LEFT JOIN project_repos pr ON pr.project_id = h.project_id
          WHERE h.agent_id = ?1 AND h.node_id = ?2 AND h.released_at IS NULL
@@ -263,15 +254,9 @@ fn own_holds(tx: &Tx<'_>, agent_id: &str, scope: Option<&TokenScope>) -> Result<
     let rows = stmt
         .query_map(params![agent_id, tx.node_id, tx.now], |r| {
             Ok(OwnHold {
-                id: r.get(0)?,
-                pattern: r.get(1)?,
-                project: Project {
-                    project_id: r.get(2)?,
-                    node_id: r.get(3)?,
-                    abs_path: r.get(4)?,
-                    slug: r.get(5)?,
-                    created_at: fmt_ts(r.get(6)?),
-                },
+                project: project_from_row(r)?,
+                id: r.get(5)?,
+                pattern: r.get(6)?,
                 checkout: r.get(7)?,
             })
         })?
