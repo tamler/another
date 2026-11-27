@@ -43,9 +43,9 @@ another hook status
 another hook uninstall --client all
 ```
 
-Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
+Uninstall deletes the current wrapper once no remaining client config references `another-hook.sh`. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
 
-Status counts those legacy entries as installed. Doctor warns about them and gives the install command for the affected client.
+`another hook status` counts legacy `wyres-hook.sh` configs as installed. `another doctor` warns about them, and rerunning `another hook install --client <client>` upgrades them.
 
 ## Per client
 
@@ -188,7 +188,7 @@ Two figures are over the tool-call budget on `main` as well and were not changed
 
 ### Grok and shared hook files
 
-Grok also executes hooks from Claude Code and Cursor config files. To keep one Grok event from running Another twice, an Another hook invoked with `GROK_HOOK_EVENT` set acts as `grok` and stands down when the Grok pack is installed. Without the Grok pack, Grok still gets Another through the Claude or Cursor entries, as `grok@<project>`.
+Grok also executes hooks from Claude Code and Cursor config files. To keep one Grok event from running Another twice, those entries stand down when `GROK_HOOK_EVENT` is set and the Grok pack has a runnable wrapper for that event. Otherwise the shared entries still handle the event as `grok@<project>`.
 
 ## Identity
 

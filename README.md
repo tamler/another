@@ -104,8 +104,6 @@ another hook install --client all
 
 For Codex, review and trust Another's new or changed hooks yourself in `/hooks`. In Codex's default trust flow, automatic mail delivery, heartbeats and edit holds do not run there until you do. Codex also offers `--dangerously-bypass-hook-trust`, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. `another hook status` checks configuration presence, not trust or execution. Another cannot grant trust. See [Codex trust and coverage](docs/HOOKS.md#codex-trust-and-coverage).
 
-`another hook status` also counts legacy `wyres-hook.sh` configs as installed. `another doctor` warns about them, and rerunning `another hook install --client <client>` upgrades them.
-
 The same hooks show the work queue at session start and at a prompt: a session is told which items it holds, and a name the owner gave its own limit is told when `another queue next` would hand it an item ([Queue lines](docs/HOOKS.md#queue-lines)).
 
 Besides session start, prompts and session end, the pack adds a hook after each tool call (new mail shows up mid-task) and, for Claude Code, Codex and Grok, one before each file edit (the edit takes a hold, or is stopped when another agent holds the file). The mail hook fails open. The edit hook waits 300 ms for a database lock, then up to 2.7 s more (3 s in all), and then denies the edit; a check that fails is also a deny. A missing database or an old schema still fails open. See [docs/HOOKS.md](docs/HOOKS.md).
