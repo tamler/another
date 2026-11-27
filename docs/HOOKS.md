@@ -52,6 +52,7 @@ Uninstall removes only entries that reference `another-hook.sh`, and deletes the
 ```bash
 proj=$(mktemp -d)/proj && mkdir -p "$proj" && cd "$proj" && git init -q .
 export ANOTHER_HOME=$(mktemp -d)/home
+unset ANOTHER_AGENT
 another init
 another agent register lead --program claude --project "$proj"
 another agent register claude --program claude --project "$proj"
@@ -59,6 +60,8 @@ another send --from lead@proj --to claude@proj --subject "PING-1" --body "live c
 claude -p "Create hello.txt containing hi, then reply with the subject of any Another message you were shown, or NONE."
 another activity --since 10m
 ```
+
+Unset `ANOTHER_AGENT` so an identity already exported in a coordination shell does not override the client's hook registration or look for an agent that is not in the scratch database.
 
 Use the client's name in place of `claude`: `codex` with `codex exec`, `grok` with `grok -p`.
 
@@ -74,7 +77,7 @@ If the model takes a hold itself with `another hold acquire` before editing (age
 | Client | Result |
 |---|---|
 | Claude Code 2.1.325 | all three checks pass |
-| Codex CLI 0.169.0 | all three pass, with the hooks already trusted under `/hooks`. The model took its hold itself, and `PreToolUse` ran for `apply_patch`. |
+| Codex CLI 0.169.0 | hooks already trusted under `/hooks`. The model named the ping, and session start and end were recorded. The model took its hold itself, so the edit hook found that hold and took none of its own; `PreToolUse` ran for `apply_patch`. Automatic hold acquisition by the edit hook was not verified, so this does not count as all three checks passing. |
 | Grok CLI 1.0.77 | session start, digest announcement, edit guard hold and session end all ran. A headless `grok -p` did not approve the write (even with `--permission-mode acceptEdits`), and the model did not name the ping in two runs, so delivery of the digest to the model is not confirmed for headless Grok. Check it in an interactive session. |
 | Cursor | not checked (not installed on the test machine) |
 
