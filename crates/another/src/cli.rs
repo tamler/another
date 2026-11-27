@@ -90,7 +90,7 @@ pub enum Command {
         /// (Both run only on a loopback server without --auth.)
         #[arg(long)]
         no_wake: bool,
-        /// Seconds between checks for new mail to wake idle Herdr agents for.
+        /// Seconds between checks for messages that can wake idle Herdr agents.
         #[arg(long, default_value_t = 2)]
         wake_secs: u64,
         /// Append log records to this file instead of stderr (the Windows daemon uses this;
@@ -180,7 +180,7 @@ pub enum Command {
         #[arg(long)]
         ack: bool,
     },
-    /// Show an agent's inbox and open requests.
+    /// List an agent's messages and open requests.
     Inbox {
         #[command(flatten)]
         agent: AgentArg,
@@ -392,8 +392,8 @@ pub enum Command {
         #[arg(long)]
         summary: bool,
     },
-    /// Count coordination evidence: edits stopped by a hold, holds the edit hook took, mail
-    /// pushed into running sessions and whether it was acted on, requests claimed and done.
+    /// Count coordination evidence: edits stopped by a hold, holds the edit hook took, messages
+    /// pushed into running sessions and whether agents acted on them, requests claimed and done.
     Stats {
         /// Start point: a duration (30m, 48h, 2d), an RFC 3339 time, or an event id.
         #[arg(long, default_value = "24h")]
@@ -409,7 +409,7 @@ pub enum Command {
     },
     /// Read-only work board, per project: who holds which paths and until when, which paths
     /// the edit hook claimed for each agent recently, edits it stopped, and what is waiting
-    /// on whom (unread mail, acknowledgements, pending requests). Writes nothing.
+    /// on whom (unread messages, acknowledgements, pending requests). Writes nothing.
     Board {
         /// Only this project (slug or path) and sibling checkouts of the same repository.
         #[arg(long, short = 'p')]
@@ -469,7 +469,7 @@ pub struct WakeRun {
     /// a cmux surface id.
     #[arg(long)]
     target: Option<String>,
-    /// Text to send (default: a one-line inbox summary).
+    /// Text to send (default: a one-line message summary).
     #[arg(long)]
     message: Option<String>,
     /// Wake even when nothing is unread. It does not override a wake that is refused
@@ -659,7 +659,8 @@ pub enum OauthCmd {
         /// The agent this grant acts as. Register it first.
         #[arg(long, short = 'a')]
         agent: String,
-        /// Project path or slug glob this grant may touch (repeatable). Omit for mailbox and feed only.
+        /// Project path or slug glob this grant may touch (repeatable).
+        /// Omit for agent messaging, heartbeat and feed access only.
         #[arg(long = "project", short = 'p')]
         projects: Vec<String>,
         /// A note to recognise the grant by.

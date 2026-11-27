@@ -61,7 +61,7 @@ ANOTHER_AGENT=ui@shop claude</code></pre>
     <section class="guide-section" aria-labelledby="coordinate">
       <h2 id="coordinate">Mail and holds between the two</h2>
       <p>With distinct names, these work as they do between different clients:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Send mail and check a hold between two sessions"><code>another send --from parser@shop --to ui@shop --subject "API change" --body "Renamed fetch_user."
+      <pre class="code-block shell" tabindex="0" aria-label="Send messages and check a hold between two sessions"><code>another send --from parser@shop --to ui@shop --subject "API change" --body "Renamed fetch_user."
 another inbox --agent ui@shop
 another hold acquire --agent parser@shop --project . 'src/parser/**'
 another hold check --agent ui@shop --project . 'src/parser/lex.rs'</code></pre>
@@ -82,7 +82,7 @@ codex@shop               codex     active   last seen 2026-11-12T09:39:52.222Z</
 <span class="output">another: agent name "codex" is ambiguous: it is registered in several projects; use name@project, one of: codex@shop, codex@billing</span>
 <span class="command">$ another send --from claude --to codex --subject "Review the invoice parser" --body "src/invoice.rs"</span>
 <span class="output">another: agent name "codex" is ambiguous: it is registered in several projects; use name@project, one of: codex@shop, codex@billing</span></code></pre>
-      <p>Both exit with status 1 and nothing is sent. The acting agent and the recipient resolve the same way, so <code>--agent</code>, <code>--from</code> and <code>--to</code> all fail alike. The error lists the candidates; copy one. The mail then lands in the named project and nowhere else.</p>
+      <p>Both exit with status 1 and nothing is sent. The acting agent and the recipient resolve the same way, so <code>--agent</code>, <code>--from</code> and <code>--to</code> all fail alike. The error lists the candidates; copy one. The message then lands in the named project and nowhere else.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Use name@project"><code><span class="command">$ another send --from claude@shop --to codex@billing --subject "Review the invoice parser" --body "src/invoice.rs"</span>
 <span class="output">sent 01M77J1FT561NTTVYQPS8FBM9S to codex@billing</span>
 <span class="command">$ another inbox --agent codex@billing</span>

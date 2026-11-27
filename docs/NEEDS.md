@@ -23,7 +23,7 @@ another needs --limit 50      # rows shown per kind (1 to 200, default 10)
 
 ## It only reads
 
-The command opens the home the way `another doctor` does. It creates no home, migrates no database, runs no sweep, writes no event, takes no hold, sends no mail, wakes nobody, calls no transport and runs no program. It reads the database, `build.json` and `transports.json`. Like any reader of the database, it makes SQLite's two side files beside it when they are not there: `another.db-wal`, which stays empty (0 bytes), and `another.db-shm`, the 32 KB index every reader shares. On a home another process has open, the `-shm` file's bytes can change. No data is written: the database file and the contents of the `-wal` file are the same before and after.
+The command opens the home the way `another doctor` does. It creates no home, migrates no database, runs no sweep, writes no event, takes no hold, sends no messages, wakes nobody, calls no transport and runs no program. It reads the database, `build.json` and `transports.json`. Like any reader of the database, it makes SQLite's two side files beside it when they are not there: `another.db-wal`, which stays empty (0 bytes), and `another.db-shm`, the 32 KB index every reader shares. On a home another process has open, the `-shm` file's bytes can change. No data is written: the database file and the contents of the `-wal` file are the same before and after.
 
 It is local only. No MCP tool, HTTP route or dashboard panel returns the list, so a federation peer, the hub, a bearer token and an OAuth grant see exactly what they saw before.
 
@@ -119,7 +119,7 @@ A counted row exists only for a condition that stops agreed work or waits on a d
 | `decide_now` | A proposed item of kind `security` or `data-loss` | Admitted or rejected | The owner only |
 | `proposal` | A proposed item of kind `work` | Admitted or rejected | The owner, or a delegate |
 
-Next: `another queue show`, then `another queue admit` or `another queue reject`. A proposed item is the one way a decision reaches this list: mail and requests are not read.
+Next: `another queue show`, then `another queue admit` or `another queue reject`. A proposed item is the one way a decision reaches this list: messages and requests are not read.
 
 ### Agents
 
@@ -129,7 +129,7 @@ Each row is one session, not one agent name. It is taken from the reason the dae
 |---|---|---|---|
 | `blocked` | The agent waits on a person at a dialog | The transport sees another state | Answer the dialog in the pane the row names |
 | `stuck` | The last wake did not start work | The session is seen working or blocked, or one of its hooks runs | In that pane, clear the input box, then send the agent any prompt |
-| `unreachable`, `gone` | The transport has not listed the session for 60 seconds, and the session holds a bound claim or its agent has mail no channel has announced | The claim is released or finished, the mail is announced, the session is listed again, or its row is deleted | `another queue show` for each bound claim, then the release or the wait (below). With mail only: `another inbox --agent`, on one row per agent; further gone sessions of that agent that hold no claim are counted in the closing line |
+| `unreachable`, `gone` | The transport has not listed the session for 60 seconds, and the session holds a bound claim or its agent has messages no channel has announced | The claim is released or finished, the message is announced, the session is listed again, or its row is deleted | `another queue show` for each bound claim, then the release or the wait (below). With mail only: `another inbox --agent`, on one row per agent; further gone sessions of that agent that hold no claim are counted in the closing line |
 | `unreachable`, `unknown` | The transport sees a session it cannot identify for 10 minutes | It is seen in another state, or pruned after a day without hooks | Look at the pane: it may hold another session |
 | `unreachable`, `undelivered` | Three wakes in a row could not be delivered | A wake is delivered | `another doctor`, `another transport status` |
 | `transport_silent` | A transport has not answered for 10 minutes. One row per transport, however many sessions | The transport answers | `another doctor`; for Herdr also `herdr agent list` |
@@ -142,7 +142,7 @@ What a row shows of the queue:
 
 **No step on an agent row acts on the agent name.** On a machine that runs several sessions under one name, `another wake clear --agent` deletes every session row of the name, and `another wake --agent` picks whichever session ran a hook last. Neither is printed here. A blocked or stuck session is cleared in its own pane.
 
-**A stuck session.** Sending any prompt in the pane runs the session's hook, which lifts the stop and announces its mail, and the row leaves the list at once. `another transport status --attention` keeps showing the row until the next check.
+**A stuck session.** Sending any prompt in the pane runs the session's hook, which lifts the stop and announces its messages, and the row leaves the list at once. `another transport status --attention` keeps showing the row until the next check.
 
 **The release on a gone session** is printed only when all four hold: no hook of that session has run since it went gone; it has been gone for 15 minutes; a listing Another trusts had seen it live; and the row was checked in the last 5 minutes. One missed listing is not enough: after a Herdr restart every live session can read `gone` for a while. Otherwise the step is `wait: the session may come back`. The release needs `--owner`; the former claimer is mailed.
 
@@ -158,7 +158,7 @@ What a row shows of the queue:
 
 Next steps:
 
-- Always `another queue show`, then the ask step: mail the claimer and ask which session holds the item.
+- Always `another queue show`, then the ask step: message the claimer and ask which session holds the item.
 - For `name_quiet` only, a third step, `another queue release <Q> --reason "<why>" --owner`, when what is stored licenses it: the name has no session row a hook made, or every such row was checked in the last 5 minutes and is `idle` or `gone`. Any other state means ask only: `working` and `blocked` are a session at work, and `unknown`, `present` and `no_answer` may be one. A row last checked longer ago licenses nothing, whatever state it shows: with checks stopped, a session seen idle two hours ago may be inside one long tool call. A row that only holds the outcome of a wake by hand is not a session and is not counted.
 - For the other two reasons there is never a release.
 
@@ -188,7 +188,7 @@ These are shown under the list, never counted and never in `--brief`, because no
 
 | Line | What it is |
 |---|---|
-| `<n> sessions gone with nothing waiting` | Sessions the transport no longer lists that hold no bound claim and have no unannounced mail, or whose agent's mail is already a row: closed panes. They are pruned after a day |
+| `<n> sessions gone with nothing waiting` | Sessions the transport no longer lists that hold no bound claim and have no unannounced messages, or whose agent already has a row for its messages: closed panes. They are pruned after a day |
 | `<n> notices could not be sent in the last 24 hours` | Queue notices that failed, with up to five named |
 | `<n> self-admitted in the last 7 days` | Items a delegate admitted for itself, by number, with the total. This is how a self-admitted item appears in the owner list for seven days ([QUEUE.md](QUEUE.md)) |
 
@@ -258,14 +258,14 @@ One object. Every key is always present; a value that does not apply is `null` o
 
 Shown: agent addresses; item numbers, kinds, scope ids and titles (cut at 60 characters); transport names and pane ids, because the pane is where you go; why `transports.json` was refused; a skipped event's id, kind, size, the agent that wrote it and the node whose log holds it, each as one bounded line; times. Session ids are cut to 4 characters in text and 8 in JSON.
 
-Never shown: mail subjects and bodies; item bodies, done conditions, notes, reasons and result text; the detail a transport reported; the directory a hook ran in; delegate keys and tokens.
+Never shown: message subjects and bodies; item bodies, done conditions, notes, reasons and result text; the detail a transport reported; the directory a hook ran in; delegate keys and tokens.
 
 Every value an agent or a peer wrote is cleaned before it is printed, in the text form and in the JSON: control characters, zero-width and invisible characters and the characters that change the direction of text become spaces. That holds for every stored value, the stored reason of a session row and the stored outcome of a wake included, and for a reason this build does not know. The checks at write time are not relied on, since any local process can write the database. An address inside a printed command is put in single quotes when it holds anything a shell reads.
 
 ## Left out
 
-- Mail and requests addressed to you: Another has no owner address. A decision for the owner is a proposed item.
-- Requests between agents, unread mail and stopped edits: they wait on agents, and `another board` shows them.
+- Messages and requests addressed to you: Another has no owner address. A decision for the owner is a proposed item.
+- Requests between agents, unread messages and stopped edits: they wait on agents, and `another board` shows them.
 - Installation health: `another doctor`.
 - OAuth clients waiting for approval: `another oauth pending`.
 - Filters, an MCP tool, an HTTP route, a dashboard panel and a push when a row appears.

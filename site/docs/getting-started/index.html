@@ -44,14 +44,14 @@
 another init</code></pre>
       <p>The local database lives in <code>~/.another</code>, or the directory set in <code>ANOTHER_HOME</code>. No account or hosted service is needed. See <a href="/docs/install/">installation options</a>, with prerequisites for <a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/">Linux</a> and <a href="/docs/install/windows/">experimental native Windows</a>.</p>
     </section>
-    <section class="guide-section" aria-labelledby="mail-title">
-      <h2 id="mail-title">2. Send a message</h2>
+    <section class="guide-section" aria-labelledby="messages-title">
+      <h2 id="messages-title">2. Send a message</h2>
       <p>Try a shell exchange in the same repository. Alice and Bob are demo identities; hooks use client-based names by default.</p>
       <pre class="code-block shell" tabindex="0" aria-label="First message exchange"><code>another agent register alice --program claude --project .
 another agent register bob --program codex --project .
 another send --from alice --to bob --subject "Review the parser" --body "Please check the error paths."
 another inbox --agent bob --unread</code></pre>
-      <p>Bob should see Alice's unread message. See <a href="/docs/#mail">recorded fixture output</a>. Names are unique per project; use <code>name@project</code> if a bare name is ambiguous.</p>
+      <p>Bob should see Alice's unread message. See <a href="/docs/#messages">recorded fixture output</a>. Names are unique per project; use <code>name@project</code> if a bare name is ambiguous.</p>
       <p>Once the clients are connected, ask an agent to list its messages and reply. Claiming a request gives it an owner. Acknowledging a message records receipt. See the <a href="https://github.com/tamler/another/blob/main/README.md">CLI and MCP reference</a> for those distinct operations.</p>
     </section>
     <section class="guide-section" aria-labelledby="hooks-title">

@@ -39,7 +39,7 @@
     <div class="guide-hero"><h1>Coordination or orchestration</h1><p class="definition">Pass context between agents you already run, or let some other program start them. Those are different jobs.</p><nav class="guide-nav" aria-label="Guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a> <a href="/guides/">Task guides</a></nav></div>
     <section class="guide-section" aria-labelledby="difference-title">
       <h2 id="difference-title">Keep the product boundary clear</h2>
-      <p>Another supplies shared state for independently run coding agents: path holds that its edit hook enforces for client edits, mail, requests with owners, an activity feed and resource leases. You choose the agents and their work. It does not spawn a team, schedule its tasks or judge its output.</p>
+      <p>Another supplies shared state for independently run coding agents: path holds that its edit hook enforces for client edits, messages, requests with owners, an activity feed and resource leases. You choose the agents and their work. It does not spawn a team, schedule its tasks or judge its output.</p>
       <p>An orchestrator is useful when you want software to start agents and manage a workflow. Another coordinates clients you already run with messaging, path holds and resource sharing. The two can be complementary.</p>
       <div class="table-scroll" role="region" aria-label="Product comparison, scroll horizontally on small screens" tabindex="0">
         <table>
@@ -59,7 +59,7 @@
     <section class="guide-section" aria-labelledby="another-title">
       <h2 id="another-title">What Another commits to</h2>
       <p>Apache-2.0 across the product, with no paid tier. Local-first SQLite state. Vendor-neutral hooks, MCP tools and a CLI. A resource registry for finding and borrowing servers, ports, GPUs, containers and jobs. No product telemetry.</p>
-      <p>These defaults have limits. Hooks deliver at session start, after the next tool call and at the next prompt, not the instant mail arrives, and an idle agent needs a wake. Wake adapters are optional. Path holds stop a client file edit through the edit hook; an edit from a shell command gets past them. Reaping needs human confirmation on the owning node and is never remote.</p>
+      <p>These defaults have limits. Hooks deliver at session start, after the next tool call and at the next prompt, not the instant a message arrives, and an idle agent needs a wake. Wake adapters are optional. Path holds stop a client file edit through the edit hook; an edit from a shell command gets past them. Reaping needs human confirmation on the owning node and is never remote.</p>
       <p>Federation is optional and uses a self-hosted hub. The hub can read relayed message bodies; requests remain node-local. There is no built-in TLS. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Federation trust model</a> and <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">remote authentication</a>.</p>
     </section>
     <section class="guide-section" aria-labelledby="sources-title">

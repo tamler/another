@@ -82,7 +82,7 @@ another token list
 another token revoke <token-id>
 ```
 
-Project globs match a project's absolute path and its slug (`*` stays within one path segment, `**` crosses segments). With no `--project`, the token can still use its own mailbox, heartbeat and the activity feed, but every project-scoped call is denied.
+Project globs match a project's absolute path and its slug (`*` stays within one path segment, `**` crosses segments). With no `--project`, the token can still read and send messages, send a heartbeat and read the activity feed, but every project-scoped call is denied.
 
 ### 2. Run an authenticated server on loopback
 
@@ -123,7 +123,7 @@ another oauth pending
 another oauth approve abcd-efgh --agent chatgpt --project '/path/to/work/*'
 ```
 
-Register the agent first (`another agent register chatgpt --program other`). `--project` repeats, and uses the same globs as bearer tokens. Omit it and the grant can use its mailbox, heartbeat and the feed, and nothing project-scoped.
+Register the agent first (`another agent register chatgpt --program other`). `--project` repeats, and uses the same globs as bearer tokens. Omit it and the grant can read and send messages, send a heartbeat and read the feed, and nothing project-scoped.
 
 ```bash
 another oauth deny abcd-efgh

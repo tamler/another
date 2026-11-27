@@ -40,7 +40,7 @@
       <h1>Another docs</h1>
       <p class="definition">Start with one local node. Add hooks and MCP.</p>
       <p>New here? <a href="/docs/getting-started/">Send your first message</a>, or see the <a href="/docs/install/">installation guide</a>.</p>
-      <nav class="guide-nav" aria-label="On this page"><a href="#connections">Connections</a> <a href="#mail">Mail</a> <a href="#wake">Wake</a> <a href="#resources">Resources</a> <a href="#remote">Remote peers</a></nav>
+      <nav class="guide-nav" aria-label="On this page"><a href="#connections">Connections</a> <a href="#messages">Messages</a> <a href="#wake">Wake</a> <a href="#resources">Resources</a> <a href="#remote">Remote peers</a></nav>
     </div>
     <section class="guide-section" id="task-guides" aria-labelledby="task-guides-title">
       <h2 id="task-guides-title">Task guides</h2>
@@ -57,14 +57,14 @@ another init</code></pre>
     </section>
     <section class="guide-section" id="connections" aria-labelledby="connections-title">
       <h2 id="connections-title">Connect a client</h2>
-      <p>Hooks supply a digest at session start, a one-line notice after the next tool call when mail lands mid-task, and a notice on the next prompt. Before each file edit they take a hold on that file for the editing agent, or stop the edit when another agent holds it. Message bodies stay out of the digest and activity feed.</p>
+      <p>Hooks supply a digest at session start, a one-line notice after the next tool call when a message arrives mid-task, and a notice on the next prompt. Before each file edit they take a hold on that file for the editing agent, or stop the edit when another agent holds it. Message bodies stay out of the digest and activity feed.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Preview hook changes"><code><span class="command">$ another hook install <span class="token">--client</span> claude,codex,grok <span class="token">--dry-run</span></span>
 <span class="output">dry run: nothing written</span></code></pre>
       <p class="quiet">First line of the hook plan.</p>
       <p>Remove <code>--dry-run</code> to install user-global hooks. The installer backs up changed configs and preserves existing hooks and permissions.</p>
       <dl class="clients">
         <div class="client"><dt>Claude Code</dt><dd><code tabindex="0">~/.claude/settings.json</code><p>Session-start and prompt output enters context; the tool hooks add a mid-task notice and the edit guard.</p></dd></div>
-        <div class="client"><dt>Codex</dt><dd><code tabindex="0">~/.codex/hooks.json</code><p>For Codex, review and trust Another's new or changed hooks yourself in <code>/hooks</code>. In Codex's default trust flow, automatic mail delivery, heartbeats and edit holds do not run there until you do. Codex also offers <code>--dangerously-bypass-hook-trust</code>, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. <code>another hook status</code> checks configuration presence, not trust or execution. Another cannot grant trust. See <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md#codex-trust-and-coverage">Codex trust and coverage</a>.</p></dd></div>
+        <div class="client"><dt>Codex</dt><dd><code tabindex="0">~/.codex/hooks.json</code><p>For Codex, review and trust Another's new or changed hooks yourself in <code>/hooks</code>. In Codex's default trust flow, automatic message notices, heartbeats and edit holds do not run there until you do. Codex also offers <code>--dangerously-bypass-hook-trust</code>, which runs enabled hooks without persisted trust for that one invocation; Another does not recommend it. <code>another hook status</code> checks configuration presence, not trust or execution. Another cannot grant trust. See <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md#codex-trust-and-coverage">Codex trust and coverage</a>.</p></dd></div>
         <div class="client"><dt>Grok CLI</dt><dd><code tabindex="0">~/.grok/hooks/another.json</code><p>User-level hooks need no project-hook trust step.</p></dd></div>
       </dl>
       <p>The default identity is <code>client@project</code>, registered on first use. <a href="https://github.com/tamler/another/blob/main/docs/HOOKS.md">Hook behavior and removal</a>.</p>
@@ -79,16 +79,16 @@ another init</code></pre>
 }</code></pre>
       <p>Or start a shared loopback HTTP server with <code>another serve</code>. The default endpoint is <code>http://127.0.0.1:7466/mcp</code>. Run <code>another serve --help</code> for the server options.</p>
     </section>
-    <section class="guide-section" id="mail" aria-labelledby="mail-title">
-      <h2 id="mail-title">Send and read mail</h2>
+    <section class="guide-section" id="messages" aria-labelledby="messages-title">
+      <h2 id="messages-title">Send and read messages</h2>
       <p>Run these from one physical project root after <code>another init</code>. The explicit project flag scopes the demo identities to that checkout.</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Try sending mail"><code>another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
+      <pre class="code-block shell" tabindex="0" aria-label="Try sending messages"><code>another agent register alice <span class="token">--program</span> claude <span class="token">--project</span> .
 another agent register bob <span class="token">--program</span> codex <span class="token">--project</span> .
 another send <span class="token">--from</span> alice <span class="token">--to</span> bob <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Please check the error paths." <span class="token">--request</span>
 another inbox <span class="token">--agent</span> bob
 another activity <span class="token">--summary</span></code></pre>
       <p>Use <code>name@project</code> when a bare name is ambiguous. Requests can be claimed, released, completed or cancelled. Messages stay in threads with read and acknowledgement state.</p>
-      <h3>Inbox output</h3>
+      <h3>Message listing</h3>
       <p>The recorded fixture below used a repository named <code>shop</code>. Your project slug, identifiers and timestamps will differ.</p>
       <pre class="code-block columnar" tabindex="0" aria-label="Recorded inbox columns"><code>bob@shop: 1 unread (0 urgent), 0 awaiting ack, 1 request(s)
    new  2026-11-03T02:48:32.807Z  alice@shop       Review the parser  [01M6FMXVS7KPZV6RR6JTH0VCKJ]
@@ -116,7 +116,7 @@ open      -                Review the parser  (from alice@shop)  [01M6FMXVS73X1C
 <span class="command">$ another wake <span class="token">--agent</span> bob@shop <span class="token">--dry-run</span></span>
 <span class="output">would run: tmux <span class="token">send-keys</span> <span class="token">-t</span> %3 <span class="token">-l</span> Another: 1 unread message(s) (0 urgent) and 1 open request(s) for bob@shop: "Review the parser". Read them with the fetch_inbox tool (or `another inbox <span class="token">--agent</span> bob@shop`), then reply with send_message / `another reply` and mark them done with acknowledge / `another ack`.
 would run: tmux <span class="token">send-keys</span> <span class="token">-t</span> %3 Enter</span></code></pre>
-      <p>Replace <code>%3</code> with your pane. Drop <code>--dry-run</code> to send. Agents with no unread mail and no requests waiting on them are skipped. A loopback <code>another serve</code> wakes idle Herdr agents by itself; on macOS, <code>another daemon install</code> keeps one running under launchd. <a href="/guides/wake-idle-agents/">Wake guide</a>, <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">wake targets and adapters</a>, and <a href="https://github.com/tamler/another/blob/main/docs/DAEMON.md">the daemon</a>.</p>
+      <p>Replace <code>%3</code> with your pane. Drop <code>--dry-run</code> to send. Agents with no unread messages and no requests waiting on them are skipped. A loopback <code>another serve</code> wakes idle Herdr agents by itself; on macOS, <code>another daemon install</code> keeps one running under launchd. <a href="/guides/wake-idle-agents/">Wake guide</a>, <a href="https://github.com/tamler/another/blob/main/docs/WAKE.md">wake targets and adapters</a>, and <a href="https://github.com/tamler/another/blob/main/docs/DAEMON.md">the daemon</a>.</p>
       <h3>herdr plugin</h3>
       <p>The optional <code>another.inbox</code> plugin adds a wake action, an activity summary and a refreshing activity pane. <a href="https://github.com/tamler/another/tree/main/integrations/herdr">Plugin guide</a>.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install herdr plugin"><code>herdr plugin install <span class="token">tamler/another/integrations/herdr</span></code></pre>
@@ -146,7 +146,7 @@ This is the only time the token is shown. Give it to the remote peer as `Authori
       <p>Tokens act as one registered agent; <code>--project</code> scopes project access and <code>--expires</code> sets an expiry. The secret is printed once.</p>
       <p>With <code>--auth</code>, every MCP and activity request requires a token, including loopback requests. Another has no built-in TLS. Tunnel hostnames must be listed with <code>--allowed-host</code>. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Full remote setup</a>.</p>
       <p>A hosted client such as ChatGPT or Claude.ai signs in with OAuth instead of a pasted token: run <code>another serve --auth --public-url</code> behind your tunnel, or <code>another remote up</code>, add that URL as a connector, and approve the grant on this machine with <code>another oauth approve</code>. The ChatGPT desktop app on the same machine needs none of that; point it at <code>another serve --stdio</code> or the loopback URL.</p>
-      <p>For several machines, federation pairs nodes and syncs signed events through a self-hosted hub. The hub can read the mail bodies it relays. A federation-only listener (<code>another serve --federation</code> without <code>--auth</code>) serves only <code>/fed/*</code> and <code>/health</code>; add <code>--auth</code> if you also want token-gated MCP and activity routes on that listener. Plain cross-node mail is supported; requests stay node-local. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Pairing, permissions and sync</a>.</p>
+      <p>For several machines, federation pairs nodes and syncs signed events through a self-hosted hub. The hub can read the messages it relays. A federation-only listener (<code>another serve --federation</code> without <code>--auth</code>) serves only <code>/fed/*</code> and <code>/health</code>; add <code>--auth</code> if you also want token-gated MCP and activity routes on that listener. Plain cross-node messages is supported; requests stay node-local. <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">Pairing, permissions and sync</a>.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

@@ -22,7 +22,7 @@ For each project with live holds, recent edits or stopped edits, most recently a
 
 Then, for the whole node or the filtered project:
 
-- **Agents.** Each agent with a hold, unread mail, a message waiting for its acknowledgement, or a pending request. Presence (`live`, `idle`, `offline`) follows the same rule as the dashboard.
+- **Agents.** Each agent with a hold, unread messages, a message waiting for its acknowledgement, or a pending request. Presence (`live`, `idle`, `offline`) follows the same rule as the dashboard.
 - **Pending requests.** Open, claimed and stale requests, oldest first, with sender, recipients and owner. Claimed work counts against its owner; open or stale work counts against its recipients.
 
 No message bodies are included.
@@ -76,7 +76,7 @@ Because nothing is swept, a hold past its expiry is left out by its expiry time,
 ## Limits
 
 - **Edits are the edit hook's record, not a diff.** The hook writes an event when it takes a hold. Later edits under a hold the agent already has write nothing, so the board shows the first edit of each file per hold, not every edit, and never line counts. Edits made without the hook (an agent with no hook pack, a human in an editor) are not on the board.
-- **This node only.** Holds and edit events are node-local, like `another holds`. Requests and mail stored on this node are included.
+- **This node only.** Holds and edit events are node-local, like `another holds`. Requests and messages stored on this node are included.
 - **Sibling checkouts** come from the repository cache Another fills in as projects are used (the edit hook, hold commands, `another holds`). The board reads that cache and never refreshes it, so a checkout no command has touched yet is not grouped with its siblings.
 - **History scan cap.** One read scans at most 5,000 edit-hook and stopped-edit events, newest first. Only events that can appear on the board count: they must be in the window and in a project in view, and manual hold changes don't count. If there are more, the oldest ones in the window are left out and the board says so: `history_truncated: true` in JSON, and a closing note in the text output. A narrower `--since` or `--project` brings them back.
 

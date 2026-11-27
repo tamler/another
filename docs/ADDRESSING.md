@@ -173,7 +173,7 @@ The last row is the form of the error in the code; it was not part of this run, 
 
 ## Across nodes
 
-`name@project` looks at this node's projects. If nothing matches, Another tries the part after the `@` as a node name for a project-less agent on a paired node, which is why the unknown-project message mentions syncing. To reach an agent on another node, write all three parts, `name@project@node`, or `name@@node` for an agent registered there without a project ([FEDERATION.md](FEDERATION.md)). `name@project` does not pick between two nodes that both have a `codex@shop`; the node part does. Requests stay on one node either way; cross-node addresses carry plain mail only.
+`name@project` looks at this node's projects. If nothing matches, Another tries the part after the `@` as a node name for a project-less agent on a paired node, which is why the unknown-project message mentions syncing. To reach an agent on another node, write all three parts, `name@project@node`, or `name@@node` for an agent registered there without a project ([FEDERATION.md](FEDERATION.md)). `name@project` does not pick between two nodes that both have a `codex@shop`; the node part does. Requests stay on one node either way; cross-node addresses carry plain messages only.
 
 ## What was run
 

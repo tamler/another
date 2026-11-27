@@ -1,6 +1,6 @@
 # Waking agents through a transport
 
-A working agent learns about mail from its hooks: a notice after its next tool call or at its next prompt (see [HOOKS.md](HOOKS.md)). An agent sitting idle at its prompt runs no hook, so something has to type into its session. That is a wake, and it is a core part of Another (D84): the daemon wakes idle agents by itself, and `another wake` does it on demand. Hooks are the fallback everywhere: with no transport and no daemon, mail still arrives at the agent's next turn.
+A working agent learns about messages from its hooks: a notice after its next tool call or at its next prompt (see [HOOKS.md](HOOKS.md)). An agent sitting idle at its prompt runs no hook, so something has to type into its session. That is a wake, and it is a core part of Another (D84): the daemon wakes idle agents by itself, and `another wake` does it on demand. Hooks are the fallback everywhere: with no transport and no daemon, messages still arrive at the agent's next turn.
 
 A **transport** is a tool that runs agent sessions. Another talks to every transport through one interface with three operations:
 
@@ -81,7 +81,7 @@ Another keeps one row per agent **session**, not per agent name: two sessions un
 - Herdr reports no session id for Codex agents today. Such a session gets a **weak match**: the same pane, the same client kind, and the same directory as its own hook saw, and no newer session of that client kind captured in that pane. A weak match is enough to wake the agent. It is never taken as proof that the session is alive, and it cannot be followed when the pane moves.
 - A pane that reports a different session id is `unknown`: it hosts another session (a nested agent CLI, or a cleared or replaced conversation). It is never woken and never called gone.
 
-One risk remains with a weak match: another agent of the same kind, started in the same directory in that same pane, is taken for this one and gets its wake line, mail subjects included. With default agent names that is the same Another agent. With `ANOTHER_AGENT` names it may not be.
+One risk remains with a weak match: another agent of the same kind, started in the same directory in that same pane, is taken for this one and gets its wake line, message subjects included. With default agent names that is the same Another agent. With `ANOTHER_AGENT` names it may not be.
 
 **Automatic wakes for weak matches are switched on in this build** (`HERDR_WAKES_WEAK_MATCH` in `crates/another/src/transport/herdr.rs`), as they were before this interface, when every idle Herdr pane was woken. They rest on Herdr reporting a Codex at an approval dialog as `blocked` and refusing the prompt, which has not been checked against a live Codex yet. If that check fails, the constant is switched off: the daemon and `another wake --all` then skip every weakly matched session and say why, and `another wake --agent` still reaches it.
 
@@ -91,14 +91,14 @@ A weak match also compares the session's stored working directory with what the 
 
 ## When the daemon wakes an agent
 
-The daemon ([DAEMON.md](DAEMON.md)) asks each transport in use what it can see every 30 seconds and records it per session. Every 2 seconds it looks for agents with mail that no hook has announced yet, and for each one:
+The daemon ([DAEMON.md](DAEMON.md)) asks each transport in use what it can see every 30 seconds and records it per session. Every 2 seconds it looks for agents with messages that no hook has announced yet, and for each one:
 
-1. picks the agent's `idle` session whose hooks ran last, even while a sibling session is working. If every session is working, the mail is left to a post-tool hook;
+1. picks the agent's `idle` session whose hooks ran last, even while a sibling session is working. If every session is working, the message is left to a post-tool hook;
 2. asks `status` for that pane, and goes on only if the answer is `idle` and identifies the session (by its session id, or by the weak match);
-3. reserves the session and claims the mail in one step that reads the session's row again, so a hook that announced the mail meanwhile wins and nothing is typed, and two passes that overlap (two daemons on one home, or `another wake --all` beside the daemon) cannot both type into one pane;
+3. reserves the session and claims the message in one step that reads the session's row again, so a hook that announced the message meanwhile wins and nothing is typed, and two passes that overlap (two daemons on one home, or `another wake --all` beside the daemon) cannot both type into one pane;
 4. calls `wake`, and records the outcome.
 
-| Outcome | The mail | The session |
+| Outcome | The message | The session |
 |---|---|---|
 | `started` | announced | ready for the next wake after 60 seconds |
 | `unconfirmed` | announced | no change |
@@ -106,7 +106,7 @@ The daemon ([DAEMON.md](DAEMON.md)) asks each transport in use what it can see e
 | `refused_blocked`, `gone` | given back to the hooks | no change |
 | `undelivered` | given back to the hooks | tried again after 60 seconds; after three in a row, once per 10 minutes |
 
-**A line that was or may have been typed is never typed again by itself.** Typing blind into a menu can choose an option, and the input box may hold the earlier line. The stop on a session ends only when the transport sees it `working` or `blocked`, when a hook of that session runs, when you wake it by hand and it starts, or when you run `another wake clear`. Giving the mail back means the hooks announce it at the agent's next turn, so a failed wake never hides mail.
+**A line that was or may have been typed is never typed again by itself.** Typing blind into a menu can choose an option, and the input box may hold the earlier line. The stop on a session ends only when the transport sees it `working` or `blocked`, when a hook of that session runs, when you wake it by hand and it starts, or when you run `another wake clear`. Giving the messages back means the hooks announce it at the agent's next turn, so a failed wake never hides mail.
 
 The daemon wakes only sessions it can identify. A target set by hand, a bare Herdr agent name, and a session in a command transport are never woken automatically. A `blocked` agent is never prompted, and neither is one in any state other than `idle`.
 
@@ -152,7 +152,7 @@ Other marks: `weak match`; `transport not configured` for a row whose transport 
 
 The report itself has `config_error`, set when `transports.json` was refused.
 
-Herdr has no state that means "at a rate-limit menu". An idle-looking session at a menu with mail waiting ends `not_started` and is shown as `stuck`.
+Herdr has no state that means "at a rate-limit menu". An idle-looking session at a menu with messages waiting ends `not_started` and is shown as `stuck`.
 
 ## Is the session gone?
 
@@ -178,8 +178,8 @@ another wake --agent codex@shop --dry-run
 
 - **`--agent`** is a direct action by you. The target is, in order: `--target`; a target you set with `another wake set`; the agent's session whose hooks ran last; a pane that a hook of an earlier build captured from tmux or cmux; and with `--via herdr`, the agent's bare name. When the target comes from a Herdr session, Another first asks `status` and types nothing unless the pane still shows that session. A command transport cannot say which session is in a pane, so a session there is typed into as recorded, unless something Another knows says the pane may not hold that agent now; then the wake is refused until you name the pane yourself with `--target` or `another wake set` (see [What a command transport cannot do](#what-a-command-transport-cannot-do)). It does not require `idle` (Herdr itself refuses a blocked agent; a command transport refuses one where its `status` can say `blocked`), and it ignores a stop and the 60 second gap. The outcome is recorded.
 - `--via` takes `herdr` or the name of a configured command transport. Any other name is refused with what to set; `--via rex` answers "the rex transport is not in this build".
-- **`--all`** is one wake pass of the daemon, run from the command line, which makes it suitable for a cron job or a Herdr action when no daemon runs: the same choice of session, the same check, the same claim on the mail, the same stop and gap. It wakes for mail that no hook has announced yet, so after a hook has shown the mail it wakes nobody. It no longer wakes targets set by hand or bare Herdr names, and it never wakes a session in a command transport. It prints why it skipped each agent.
-- The default line is a one-line inbox summary: unread count, urgent count, open requests and up to three subjects. Message bodies are never included. With nothing unread and no open requests, `--agent` skips the agent unless you pass `--force`. That is all `--force` does: it does not override a refused wake. `--message` replaces the text, and `--agent` with `--message` wakes whether or not anything is unread.
+- **`--all`** is one wake pass of the daemon, run from the command line, which makes it suitable for a cron job or a Herdr action when no daemon runs: the same choice of session, the same check, the same claim on the message, the same stop and gap. It wakes for mail that no hook has announced yet, so after a hook has shown the message it wakes nobody. It no longer wakes targets set by hand or bare Herdr names, and it never wakes a session in a command transport. It prints why it skipped each agent.
+- The default line is a one-line message summary: unread count, urgent count, open requests and up to three subjects. Message bodies are never included. With nothing unread and no open requests, `--agent` skips the agent unless you pass `--force`. That is all `--force` does: it does not override a refused wake. `--message` replaces the text, and `--agent` with `--message` wakes whether or not anything is unread.
 - `--dry-run` prints the transport's commands and runs nothing. A wake to a command transport that would be refused because the pane may not hold the agent is reported as refused, with no command printed and a non-zero exit, as the wake itself would end. A refusal that needs an answer from the transport (Herdr's check of who is in the pane, a `status` that says `blocked` or `gone`) is not foreseen by a dry run.
 - The command exits non-zero when a wake failed (see the table of outcomes) or could not be attempted. For each wake it prints what happened in the words of that table, and what the transport answered.
 
@@ -259,7 +259,7 @@ This example gives you tmux and cmux as the built-in adapters of earlier builds 
 - `{target}` and `{message}` are replaced inside an argument in one pass, after the list of arguments is fixed. So a value never adds an argument and never splits one, whatever it holds: spaces, quotes, `$(...)`, `;`. Text inside a value that looks like a placeholder is not replaced again. Braces that are not one of the two placeholders are left alone (`#{pane_id}` is tmux's own).
 - An argument that begins with a placeholder and comes out starting with `-` would be read as an option. The wake then ends `undelivered` and nothing is run. A target can never start with `-`; a `--message` you type could.
 - The same two values are in the command's environment as `ANOTHER_TARGET` and `ANOTHER_WAKE_MESSAGE`. A script should read those.
-- The message is always the one safe line of [Waking by hand](#waking-by-hand): no control character, no bidirectional override, at most 1,000 characters. The target is held to the rule of [Targets set by hand](#targets-set-by-hand): 1-200 printable characters, no invisible or bidirectional formatting character, no leading `-`. Nothing else is given to a command: not the agent's name, not its session id, not a mail body.
+- The message is always the one safe line of [Waking by hand](#waking-by-hand): no control character, no bidirectional override, at most 1,000 characters. The target is held to the rule of [Targets set by hand](#targets-set-by-hand): 1-200 printable characters, no invisible or bidirectional formatting character, no leading `-`. Nothing else is given to a command: not the agent's name, not its session id, not a message body.
 - `{message}` has a value in `wake` only, `{target}` in `wake` and `status`. Used anywhere else, the file is refused.
 - Deadlines: 10 seconds for each `wake` command, 3 seconds for `status` and for `list`. A command that writes more than 1 MiB is stopped: `status` and `list` then count as no answer, and a `wake` command as `unknown`.
 
@@ -275,7 +275,7 @@ The whole file is refused, and no command transport exists until it is fixed, wh
 - it is larger than 1 MiB;
 - on Unix, the file is not owned by the user running Another, or is writable by group or others (`chmod go-w` fixes the second).
 
-One more check is a lint and not a security boundary: the file is refused when an argument that holds a placeholder comes directly after `-c`, or after a group of short flags that ends in `c` such as `-lc`. That is how a shell is handed its code, and a mail subject would then run as shell code. The lint knows only that pattern. It cannot see a shell reached another way, and wrapping a command in `ssh` hands the arguments to a remote shell that it cannot see either. If a command needs a shell, make it a script that reads the two environment variables.
+One more check is a lint and not a security boundary: the file is refused when an argument that holds a placeholder comes directly after `-c`, or after a group of short flags that ends in `c` such as `-lc`. That is how a shell is handed its code, and a message subject would then run as shell code. The lint knows only that pattern. It cannot see a shell reached another way, and wrapping a command in `ssh` hands the arguments to a remote shell that it cannot see either. If a command needs a shell, make it a script that reads the two environment variables.
 
 Herdr keeps working while the file is refused. The reason is printed by `another transport status`, `another wake`, `another wake list` and `another doctor`, and the daemon logs it once each time the reason changes. The file is read when a command transport is about to be used and once per check by the daemon. There is no cached copy, so a corrected file takes effect at once.
 
@@ -338,7 +338,7 @@ Another only calls these external CLIs as separate processes, with no shell and 
 
 ## Herdr plugin
 
-[integrations/herdr](../integrations/herdr) is an optional Herdr plugin. It adds a "wake agents with unread mail" action (which runs `another wake --all`), an activity summary action, and a live activity pane:
+[integrations/herdr](../integrations/herdr) is an optional Herdr plugin. It adds a "wake agents with unread messages" action (which runs `another wake --all`), an activity summary action, and a live activity pane:
 
 ```bash
 herdr plugin install tamler/another/integrations/herdr

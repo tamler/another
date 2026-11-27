@@ -4,7 +4,7 @@
 
 ## Status
 
-The seven original build milestones are complete and on `main` (they are not the scope ids M1 to M10 below): local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
+The seven original build milestones are complete and on `main` (they are not the scope ids M1 to M10 below): local core (tamler/another#1), message notices and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
 
 The current work is **v0.1.0, the single-node queue release**, approved by the project owner on 17 Nov 2026. Target tag date: 1 Dec 2026.
 
@@ -47,7 +47,7 @@ Apache-2.0; agent names unique per project; hooks are the fallback everywhere an
 
 ## Explicitly OUT of scope
 
-See the non-goals in [docs/VISION.md](docs/VISION.md) and the cut list in [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md). In short: teams and hosted multi-user setups, a plugin platform, mesh federation, an adapter per multiplexer, auto-reap, end-to-end mail encryption and a TUI.
+See the non-goals in [docs/VISION.md](docs/VISION.md) and the cut list in [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md). In short: teams and hosted multi-user setups, a plugin platform, mesh federation, an adapter per multiplexer, auto-reap, end-to-end message encryption and a TUI.
 
 ## Keep the README status current
 

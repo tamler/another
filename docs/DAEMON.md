@@ -4,10 +4,10 @@
 
 - sweeps expired holds and overdue requests every 30 seconds, and releases queue claims with no sign of life for the grace period ([QUEUE.md](QUEUE.md#when-a-claim-is-released-automatically));
 - asks each transport in use (Herdr) what it can see every 30 seconds, and records it per agent session ("The sweep", below);
-- wakes an idle agent session when mail arrives that no hook has announced yet ("Waking idle agents", below);
+- wakes an idle agent session when a message is waiting and no hook has announced it ("Waking idle agents", below);
 - every 10 minutes, drops session rows and captured wake targets that have aged out.
 
-Waking through a transport is a core part of Another, and hooks are the fallback everywhere (D84). Hooks work without the daemon: holds still expire when the next command looks at them, and mail still reaches a session at its next tool call or prompt. Without the daemon an idle agent is not woken, no session is checked, and `another transport status` says so.
+Waking through a transport is a core part of Another, and hooks are the fallback everywhere (D84). Hooks work without the daemon: holds still expire when the next command looks at them, and a message still reaches a session at its next tool call or prompt. Without the daemon an idle agent is not woken, no session is checked, and `another transport status` says so.
 
 ## Run it in the background (macOS)
 
@@ -99,7 +99,7 @@ On any other system, or a Linux without systemd, run `another serve --bind 127.0
 
 ## The sweep
 
-Every 30 seconds, for each transport that has at least one session row made by a hook, the daemon runs the transport's `list` once (`herdr agent list`) and records the answer for every such row: its state, whether the transport recognised the session (by its session id, or by the weak match for a pane that reports none), and the pane it is in now. Nothing else observes a session. So with no mail waiting, the daemon still starts one `list` process per transport in use every 30 seconds. With no session row it starts none.
+Every 30 seconds, for each transport that has at least one session row made by a hook, the daemon runs the transport's `list` once (`herdr agent list`) and records the answer for every such row: its state, whether the transport recognised the session (by its session id, or by the weak match for a pane that reports none), and the pane it is in now. Nothing else observes a session. So with no messages waiting, the daemon still starts one `list` process per transport in use every 30 seconds. With no session row it starts none.
 
 From what the sweep records come the session's shown state, the reasons under `another transport status --attention` (a `blocked` agent at once, a `gone` session after 60 seconds, `unknown` or `no_answer` after 10 minutes), the end of a stop when the agent is seen `working` or `blocked`, and the time each session was last seen alive. [WAKE.md](WAKE.md) has the rules, the session rows, and the confirmed-gone signal, which this build keeps switched off for Herdr.
 
@@ -107,22 +107,22 @@ The sweep writes no event in steady state, whatever the agents do.
 
 ## Waking idle agents
 
-Mail reaches a working agent through its `post-tool` hook at the next tool call ([HOOKS.md](HOOKS.md)). An agent sitting at its prompt makes no tool calls, so the daemon wakes it instead:
+Messages reach a working agent through its `post-tool` hook at the next tool call ([HOOKS.md](HOOKS.md)). An agent sitting at its prompt makes no tool calls, so the daemon wakes it instead:
 
-1. Every 2 seconds (`--wake-secs`) it looks, for each agent with a session row, for unread mail that no channel has announced yet. A pass with nothing new starts no process.
-2. New mail waits 2 seconds to settle, so a burst of messages becomes one wake.
-3. It picks the agent's session to wake: the `idle` one (Herdr's `idle` or `done`) whose hooks ran last, even while a sibling session of the same agent is working. Sessions that are stopped after a wake that did not start work, were woken less than 60 seconds ago, or are in any other state are left out. If no session remains and one is `working`, the mail is left to that session's `post-tool` hook and the daemon looks again in 5 seconds. A session that vanished or cannot be asked is the sweep's business alone.
+1. Every 2 seconds (`--wake-secs`) it looks, for each agent with a session row, for unread messages that no channel has announced yet. A pass with nothing new starts no process.
+2. The daemon waits 2 seconds after a message arrives, so a burst of messages becomes one wake.
+3. It picks the agent's session to wake: the `idle` one (Herdr's `idle` or `done`) whose hooks ran last, even while a sibling session of the same agent is working. Sessions that are stopped after a wake that did not start work, were woken less than 60 seconds ago, or are in any other state are left out. If no session remains and one is `working`, the message is left to that session's `post-tool` hook and the daemon looks again in 5 seconds. A session that vanished or cannot be asked is the sweep's business alone.
 4. It asks Herdr about that pane now with `herdr agent get <pane>`, and goes on only if the answer is `idle` and identifies the session. Any other answer is written nowhere, and that session is not asked again for 30 seconds.
-5. Only after Herdr has answered, and in one transaction, it reads the session's row again, reserves it for this wake and claims the mail. A hook that announced the mail meanwhile wins and no prompt is sent. A stop or a wake that another pass recorded meanwhile is seen, so two passes that overlap (two daemons on one home, or `another wake --all` beside the daemon) do not both type into one pane.
+5. Only after Herdr has answered, and in one transaction, it reads the session's row again, reserves it for this wake and claims the message. A hook that announced the message meanwhile wins and no prompt is sent. A stop or a wake that another pass recorded meanwhile is seen, so two passes that overlap (two daemons on one home, or `another wake --all` beside the daemon) do not both type into one pane.
 6. It runs `herdr agent prompt` and records the outcome as a `transport.wake` event and on the session row, in one transaction with the claim.
 
-A wake has seven possible outcomes ([WAKE.md](WAKE.md#what-a-wake-can-end-as)). `started` and `unconfirmed` keep the claim. Every other outcome gives the claim back, so the hooks announce the mail at the agent's next turn. A wake that was delivered but did not start work (`not_started`), or whose answer could not be read (`unknown`), is a recorded failure and **stops** that session: a line that was or may have been typed is never typed again by the daemon. A session that could not be reached at all (`undelivered`) is tried once a minute, and after three in a row once per 10 minutes.
+A wake has seven possible outcomes ([WAKE.md](WAKE.md#what-a-wake-can-end-as)). `started` and `unconfirmed` keep the claim. Every other outcome gives the claim back, so the hooks announce the message at the agent's next turn. A wake that was delivered but did not start work (`not_started`), or whose answer could not be read (`unknown`), is a recorded failure and **stops** that session: a line that was or may have been typed is never typed again by the daemon. A session that could not be reached at all (`undelivered`) is tried once a minute, and after three in a row once per 10 minutes.
 
-The gap after a wake is 60 seconds per session, not per agent name: after a claim was given back, another idle session of the same agent may be woken for the same mail inside that minute, so one message is typed at most once per session.
+The gap after a wake is 60 seconds per session, not per agent name: after a claim was given back, another idle session of the same agent may be woken for the same message inside that minute, so one message is typed at most once per session.
 
 The identity check and the prompt are two Herdr calls. A pane that changes hands in the milliseconds between them is typed into.
 
-If the daemon stops between typing and recording, or the record cannot be written, the claim stays taken and nothing is retyped; that mail is announced by no channel and stays unread in the inbox.
+If the daemon stops between typing and recording, or the record cannot be written, the claim stays taken and nothing is retyped; that message is announced by no channel and stays unread in the inbox.
 
 Every transport command has a deadline: 3 seconds for `herdr agent get` and `herdr agent list`, 12 seconds for a prompt (Herdr itself is given 8 seconds). Each command runs in its own process group, and its stdout and stderr are captured, 1 MiB in total; more than that ends the call. A command that runs past its deadline, or is still running when the daemon is told to stop, gets SIGTERM for its whole group (so a process it started stops too), then a hard stop half a second later. Once a command has exited, its output is collected for at most a quarter of a second more, so a background process it left holding the output cannot stall the daemon either. A wake pass stops between agents when a sweep is due, so failing wakes cannot starve the sweep. A stuck transport can neither hold up the other agents nor a clean shutdown.
 
