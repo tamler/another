@@ -57,7 +57,7 @@ another inbox <span class="token">--agent</span> codex-b</code></pre>
     <section class="guide-section" aria-labelledby="wrong-title">
       <h2 id="wrong-title">Things I had wrong</h2>
       <dl class="clients">
-        <div class="client"><dt>Wake</dt><dd>I pointed <code>another wake</code> at an agent that was mid-edit. Nothing useful happened. Wake types into an idle tmux, cmux, or Herdr target, and it skips the agent when the inbox is empty. It does not cut into a running turn.</dd></div>
+        <div class="client"><dt>Wake</dt><dd>I pointed <code>another wake</code> at an agent that was mid-edit. Nothing useful happened. Wake types into an idle tmux, cmux, or Herdr target, and it skips the agent when it has no unread messages or open requests. It does not cut into a running turn.</dd></div>
         <div class="client"><dt>Reap</dt><dd><code>another reap</code> without <code>--confirm</code> is a plan. With <code>--confirm</code> it signals a process on that machine. A remote token cannot do it. I do not want a peer box killing a local server.</dd></div>
         <div class="client"><dt>Federation</dt><dd>The hub I would host can read messages it relays. There is no end-to-end encryption. Requests do not move nodes. I say that in the docs because it is easy to skim past.</dd></div>
         <div class="client"><dt>Dashboard</dt><dd><code>another dashboard</code> opens the loopback page. <code>another serve</code> also has it at <code>/ui</code> when it is not an authenticated remote server. OAuth for ChatGPT and Claude.ai merged after I first wrote this page; a grant exists only after <code>another oauth approve</code> on this machine. Both are on the <a href="/changelog/">changelog</a>.</dd></div>
