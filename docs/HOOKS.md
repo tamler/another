@@ -45,6 +45,8 @@ another hook uninstall --client all
 
 Uninstall removes only entries that reference `another-hook.sh`, and deletes the wrapper once no client uses it. Both install and uninstall also clean up entries left by development builds from before the project was renamed (they referenced `wyres-hook.sh`, and Grok's file was `~/.grok/hooks/wyres.json`): install replaces them with current entries, and uninstall removes them.
 
+Timestamped backups accumulate across changed installs and uninstalls; uninstall leaves them in place, including backups of the wrapper. Config files created for Claude Code, Codex and Cursor also remain, with an empty `hooks` object once Another's entries are removed if no other hooks exist. Codex's top-level `description` remains too. Review these files and backups before removing any you no longer need.
+
 On native Windows the wrapper still needs a POSIX shell. The Windows install workflow exercises the CLI. Verify that your client can run the wrapper before relying on automatic notices or edit holds.
 
 ## Per client

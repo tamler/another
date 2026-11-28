@@ -17,6 +17,8 @@ cargo install --locked --git https://github.com/tamler/another another
 another --version
 ```
 
+From a local checkout, install with `cargo install --locked --path crates/another`. Use the installed binary on `PATH`; `target/release/another` is a development build and must not be used as the installed binary.
+
 Make sure Cargo's bin directory is on your `PATH`. In a test repository or a shared checkout where both agents will work, run:
 
 ```sh
@@ -28,6 +30,8 @@ another inbox --agent bob --unread
 ```
 
 Bob should see Alice's unread message. Both demo identities use this checkout and the same database, stored in `~/.another` by default. Set `ANOTHER_HOME` before initialization to use a separate database. Each client that shares it must inherit the same setting.
+
+`ANOTHER_HOME` alone does not isolate a daemon install. `another daemon install` defaults to the same per-user label, `one.toanother.another`, and port, `7466`, in every home. Installing from a test home can replace your real daemon. For a separate test daemon, choose a distinct `--label` and an unused loopback `--bind` port; see [daemon setup](docs/DAEMON.md#separate-test-daemons).
 
 Check how path holds work in the same checkout. The second command should report Alice's hold and exit with status 3. Run the release even after that expected conflict.
 
@@ -52,6 +56,8 @@ another queue done Q1 --agent bob --summary "Review recorded" --file notes.md
 
 Bob should receive the admitted item. The result records the summary and a file reference. See the [work queue guide](docs/QUEUE.md) for claim limits and handoffs.
 
+For scripted admission, the owner can name a [delegate](docs/QUEUE.md#the-delegate). The delegate uses `--agent <itself>` and its key in `ANOTHER_ADMIT_KEY` instead of `--owner`.
+
 ### Connect real agent sessions
 
 Preview the hooks for the clients you use, then install them. These commands write user-level client settings. The installer preserves existing hooks and backs up changed files.
@@ -64,6 +70,23 @@ another hook status
 
 In Codex, review and trust the installed hooks in `/hooks`. Start new sessions in the same checkout. Hooks register client-based identities and show messages at session start, at prompts, and after a tool call. Run `another agent list` to find the actual addresses. A client can also use MCP to read and send messages itself. Configure it to launch `another serve --stdio` with the same project and data directory. See [client setup](docs/HOOKS.md) and [MCP connections](https://toanother.one/docs/#connections).
 
+For a client that accepts JSON MCP settings, add this server entry:
+
+```json
+{
+  "mcpServers": {
+    "another": {
+      "command": "another",
+      "args": ["serve", "--stdio"]
+    }
+  }
+}
+```
+
+The client must find the installed binary on `PATH` and inherit `ANOTHER_HOME` if you changed it. The working directory does not matter: hold tools take the project as an argument. The config file and format depend on the client.
+
+To run a background server for your usual home, use `another daemon install`. This keeps `another serve` running under your platform's service manager; [daemon setup](docs/DAEMON.md) covers status, logs and upgrades.
+
 Path holds help Claude Code, Codex and Grok CLI avoid conflicting edits when the edit hook runs. Shell writes bypass the hook, Cursor has no edit guard, and separate checkouts have separate holds. The [daemon](docs/DAEMON.md) can expire holds and wake idle Herdr sessions. The experimental [resource registry](docs/RESOURCES.md) helps agents reuse model servers and ports.
 
 On macOS, `another daemon status` checks the loaded label's recorded `ANOTHER_HOME`; on Linux it reads the installed systemd unit's `ANOTHER_HOME`. If it belongs to a different home or cannot be verified, status says so and does not report that daemon's PID or health as this home's.
@@ -75,6 +98,14 @@ Daemon status reports healthy only when `/health` identifies this home's node. `
 For upgrades and local source installs, see the [install guide](https://toanother.one/docs/install/) and [upgrade checklist](docs/DAEMON.md#upgrading). For a second machine, see [self-hosted federation](docs/FEDERATION.md). A hub can read the messages it relays. [Authenticated remote peers](docs/REMOTE.md) and the [dashboard](docs/DASHBOARD.md) are experimental.
 
 Normal builds expose only signed federation exchange. Library compatibility tests can enable the `another` crate's `test-support` feature to simulate an older unsigned node; workspace tests enable it automatically. Keep that feature off in shipped builds.
+
+## Uninstall
+
+1. Run `another hook uninstall --client all` to remove Another's hooks while preserving other hooks and settings. [Hook removal](docs/HOOKS.md) explains the config files and backups left behind.
+2. Remove the Another MCP entry from each client and restart or reconnect that client to stop its server.
+3. If you installed the daemon, run `another daemon uninstall` before removing the binary. For a custom daemon label, pass the same `--label` you installed with. Stop any other Another servers you started.
+4. Run `cargo uninstall another`. Once release archives exist, remove the prebuilt binary instead if that is how you installed it.
+5. Delete `~/.another` only if you no longer need its local database, messages and history. If you set `ANOTHER_HOME`, remove that directory instead.
 
 ## Status
 
@@ -164,7 +195,7 @@ Logs go to stderr: `info` and above for `another serve`, `warn` and above for ev
 | Requests | `another requests`, `another request claim\|release\|complete\|cancel <id>` (recorded walkthrough: [docs/REQUESTS.md](docs/REQUESTS.md)) |
 | Work queue | `another queue propose\|list\|show\|next\|note\|release\|done` for agents; `another queue admit\|reject\|edit` for the owner (`--owner`, at a terminal) or a delegate (key in `$ANOTHER_ADMIT_KEY`); `another queue limit set\|default\|list`, `another queue delegate add\|remove\|list`, `another queue grace [<duration>]`, `another queue list --needs-owner`, `another queue audit` (`next` exits with status 3 when the agent is at its limit; [docs/QUEUE.md](docs/QUEUE.md)) |
 | What needs the owner | `another needs [--brief] [--limit N]` (read-only; exits 1 only when the list cannot be read; [docs/NEEDS.md](docs/NEEDS.md)) |
-| Holds | `another hold acquire\|check\|renew\|release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
+| Holds | `another hold acquire\|check\|renew\|release\|request-release`, `another holds` (conflicts exit with status 3; `--repo-wide` for a whole-project hold) |
 | Sessions and feed | `another heartbeat [--start\|--end [--keep]]`, `another activity [--since 3600] [--kinds mail,request] [--summary]`, `another stats [--since 48h]`, `another board [--project P] [--since 24h]` (`--since` accepts bare seconds; [docs/ACTIVITY.md](docs/ACTIVITY.md), [docs/BOARD.md](docs/BOARD.md)) |
 | Hooks | `another hook install\|uninstall --client <c>\|all [--dry-run]`, `another hook status` |
 | Daemon | `another daemon install\|uninstall\|status\|restart` (launchd, systemd user unit, Task Scheduler), `another serve [--no-wake]`, and `another doctor` to check the whole installation without changing it ([docs/DOCTOR.md](docs/DOCTOR.md)) |

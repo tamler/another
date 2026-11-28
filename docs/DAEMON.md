@@ -11,6 +11,19 @@ Waking through a transport is a core part of Another, and hooks are the fallback
 
 On every supported platform, `another daemon status` reports `healthy` only when a successful `/health` response names the same `node_id` as the current home's database, opened read-only. Another node, a missing node id, malformed JSON or an unreadable database reports `healthy no`, with a detail. A failed connection reports that `/health` could not be reached; a non-numeric or non-loopback bind reports that the address was not checked. The check contacts only a numeric loopback address, follows no redirects and reads at most 16 KiB. `another doctor` checks launchd on macOS and the systemd user unit on Linux, reading the installed definition's `ANOTHER_HOME` on both platforms to flag another home, and reusing its server check's result without another network call. Doctor warns when a response names a different node, but still accepts a successful response with no readable node id or no local database identity; its `healthy` row does not guarantee identity in those cases.
 
+## Separate test daemons
+
+`ANOTHER_HOME` selects the database, but does not change the default per-user daemon label (`one.toanother.another`) or bind (`127.0.0.1:7466`). Running `another daemon install` from a test home with those defaults can replace the daemon for your usual home and restart it against the test database.
+
+For a separate test daemon, set the test `ANOTHER_HOME`, choose a distinct label and an unused loopback port, and preview the install first:
+
+```bash
+another daemon install --label one.toanother.another-test --bind 127.0.0.1:47466 --dry-run
+another daemon install --label one.toanother.another-test --bind 127.0.0.1:47466
+```
+
+Use the same `ANOTHER_HOME` and `--label` for its status, restart and uninstall commands. Keep that label and bind when reinstalling it. To test only foreground serving, run `another serve --bind 127.0.0.1:47466` instead.
+
 ## Run it in the background (macOS)
 
 ```bash
