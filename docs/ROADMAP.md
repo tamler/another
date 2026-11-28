@@ -1,6 +1,6 @@
 # Roadmap
 
-Updated 27 Nov 2026. This page tracks current work against the approved v0.1.0 plan. [VISION.md](VISION.md) says what Another is for and lists its non-goals. [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md) is the plan approved on 17 Nov 2026: what v0.1.0 must have, may have, freezes and cuts, and the 1 Dec 2026 tag date. It remains the source of truth for that scope. Decisions are in [DECISIONS.md](DECISIONS.md).
+Updated 28 Nov 2026. This page tracks current work against the approved v0.1.0 plan. [VISION.md](VISION.md) says what Another is for and lists its non-goals. [V0.1.0-SCOPE.md](V0.1.0-SCOPE.md) is the plan approved on 17 Nov 2026: what v0.1.0 must have, may have, freezes and cuts, and the 1 Dec 2026 tag date. It remains the source of truth for that scope. Decisions are in [DECISIONS.md](DECISIONS.md).
 
 ## What Another is
 
@@ -20,8 +20,10 @@ This is what is on `main` today. Where a done condition from the 17 Nov plan is 
 - **`another needs`** (M7, D94). One read-only list of what waits on the owner, and the read-only scan in `another doctor` for lapsed resources and unregistered listeners.
 - **Daemon on macOS and Linux** (M8, D71). Wake and expiry run in the background.
 - **Federation as it exists** (M9). Signed event logs, pairing, and hub and spoke sync of messages, holds and activity. The Q26 to Q31 fixes landed: pairing proves key possession (D101), the hub signs its invites and answers (D103), peer hold patterns are bounded (D102), oversized events are skipped loudly, and the Q31 pre-tag P2 security findings are closed (#281). Cross-node holds are still warnings only (D26), and queue claims are local to one node.
-- **FLE-23 consolidations M-A, M-B, M-C and M-E** (#287, #283, #284, #282). Shared time helpers, shared crypto helpers with constant-time digest compare, shared path and git-root helpers, and test-support helpers for forged events. M-A's bare-seconds follow-through is #294.
-- **Docs alignment** (#285). README and site match what is on `main` after Q31 and FLE-23.
+- **FLE-23 consolidations M-A, M-B, M-C and M-E** (#287, #283, #284, #282). Shared time helpers, shared crypto helpers with constant-time digest compare, shared path and git-root helpers, and test-support helpers for forged events. #294 completed M-A's bare-seconds follow-through.
+- **Docs alignment** (#285, #289). The README, guides, CLI help and site describe background messaging for agents. #289 includes the #288 audit.
+- **Security fixes on main.** #290 closed P3 findings that needed no wire change. #307 added a warning for an unauthenticated loopback listener. #308 binds signed sync requests to one hub and rejects replays. #309 summarizes unauthenticated audit refusals omitted by the write budget. #310 records the canonical binary path for hooks. #313 implemented federated hold ownership and collision reporting (D111).
+- **FLE-23 follow-through.** M-K part 1, M-Y, M-W, M-N, M-Z, M-O, M-AD and M-P have merged (#295, #291, #298, #299, #300, #303, #302 and #306). The daemon status and doctor follow-through (M8 F2, #297) has also merged.
 
 No release has been tagged and no prebuilt binary is published yet.
 
@@ -30,11 +32,9 @@ No release has been tagged and no prebuilt binary is published yet.
 These are in progress or next. They land on `main` as part of getting to the first tag. The scope page still governs what the tag requires.
 
 - **Prebuilt binaries** (D105, M10). In progress. People install a binary instead of building from source. Publishing a tag or a GitHub Release is the owner's call. The 17 Nov scope named macOS and Linux archives; Windows x86_64 prebuilds are added by the D32 amendment in PR #293, approved by the project owner on 27 Nov 2026 at 4:30 PM Manila.
-- **Every remaining security issue fixed in code** (D106). #308 binds signed sync requests to one hub and rejects replays. #309 summarizes unauthenticated audit refusals omitted by the write budget. #313 implemented hold ownership and collision reporting (D111). Issue #134 remains open.
-- **Docs that match the positioning.** #289 includes the #288 audit of the README, guides, CLI help and site.
-- **Duplication cleanup (FLE-23).** M-A's shared time helpers merged in #287, and #294 finished its bare-seconds handling. The [27 Nov admitted items](V0.1.0-SCOPE.md#admitted-27-nov-2026-by-the-pm-delegate-fle-23-follow-through) list the remaining work and its done conditions, including any schema, wire or hook contract changes.
+- **Remaining security fixes** (D106). Open work includes pinned dependency audit checks (#292), remote hold confinement (#314) and shared federation HTTP policy (#318). Issue #134 remains open.
+- **Duplication cleanup (FLE-23).** The [27 Nov admissions table](V0.1.0-SCOPE.md#admitted-27-nov-2026-by-the-pm-delegate-fle-23-follow-through) records completed items and the conditions for work still open, including any schema, wire or hook contract changes.
 - **One lease model before the first tag** (D109, SPEC-B7). Holds, resource leases and queue claims share one record, one renewal rule and one session-end rule. This lands before the first tag.
-- **A command to unregister an agent.** In progress. There is no way to remove a registered agent today.
 - **Hold and hook fixes revived from open pull requests.** Each was admitted and needs a rebase and review:
   - #165: MCP resolves a local caller's project paths the same way the CLI does.
   - #179: nested projects outside git see each other's holds.

@@ -64,7 +64,7 @@ The hub enforces permissions on what spokes push, and each node checks them agai
 
 ## Set up
 
-Upgrade a hub and all its spokes together, and make invites after the hub's upgrade: a hub and a spoke sync only when both run a build that signs answers, a hub accepts only signed pairing requests, and a spoke joins only with an invite its hub signed (see "Upgrading" below). Nodes that are already paired stay paired; they do not pair again.
+For the current signed-request upgrade, update the spokes first. See [Upgrading](#upgrading) for the current procedure and the earlier transition to signed answers. Hubs accept signed pairing requests, and spokes require invites signed by their hubs. Nodes that are already paired stay paired.
 
 Name each node first; names must be unique across the federation, whatever their case:
 
@@ -172,7 +172,9 @@ From this build on, a list reaches a spoke only in an answer its hub signed, so 
 
 ### Upgrading
 
-**A hub and its spokes are upgraded together.** From this build on the hub signs its answers to a push and a pull, and a spoke applies nothing else. There is no working mix of builds for sync:
+**Signed requests (#308).** Update the spokes first, then the hub. A spoke with this change can sync with a hub that signs its answers but still accepts the earlier request signature. After the hub is updated, it requires the new request signature. No node pairs again.
+
+**Earlier transition to signed answers (D103).** The table below compares builds with and without D103. In that transition, no mixed-build link can sync.
 
 | Hub | Spoke | Join | Sync |
 |---|---|---|---|
@@ -181,7 +183,7 @@ From this build on, a list reaches a spoke only in an answer its hub signed, so 
 | older | this build | refused before anything is sent: `this invite is not signed by its hub: ...` | refused by the spoke: `the hub at <address> answered the push without a signature; refused, and nothing from that answer was applied. Either the hub runs an older build (update the hub and its spokes together), or ...`, exit 1. If that request was a push, the older hub has already stored the batch; it is sent again after the hub is updated and counts as already there |
 | older | older | as before | as before, and open to everything this build closes |
 
-- Upgrade a hub and all its spokes in one sitting. In a chain (a hub that is itself a spoke of another hub), go from the top down. Each link behaves by the table on its own: a node on this build between an older hub and its own spokes refuses the older hub's answers and keeps serving its spokes.
+- For the D103 transition, upgrade a hub and all its spokes in one sitting. In a chain (a hub that is itself a spoke of another hub), go from the top down. Each link behaves by the table on its own: a node on this build between an older hub and its own spokes refuses the older hub's answers and keeps serving its spokes.
 - The order within the sitting does not matter for safety. Whichever end is behind, sync on that link stops with one of the two texts above until it follows, and then resumes from the stored cursors.
 - Nothing is lost in between. Events wait in each node's log, and cursors move only on an answer that was applied.
 - No node pairs again. Neither refusal touches a pairing, so after both ends are updated `another sync` works with the hub, key and cursors each node already has.
