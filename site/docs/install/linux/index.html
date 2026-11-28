@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Install Another on Linux: compiler, Rust and PATH</title>
-  <meta name="description" content="Install Another on Linux: why Ubuntu's packaged Rust is too old, the C compiler you need, the Cargo command, PATH and orphan-scan tools.">
+  <meta name="description" content="Prebuilt Linux binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Static musl archives for x86_64 and aarch64.">
   <link rel="canonical" href="https://toanother.one/docs/install/linux/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Install Another on Linux: compiler, Rust and PATH">
-  <meta property="og:description" content="Install Another on Linux: why Ubuntu's packaged Rust is too old, the C compiler you need, the Cargo command, PATH and orphan-scan tools.">
+  <meta property="og:description" content="Prebuilt Linux binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Static musl archives for x86_64 and aarch64.">
   <meta property="og:url" content="https://toanother.one/docs/install/linux/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Install Another on Linux: compiler, Rust and PATH">
-  <meta name="twitter:description" content="Install Another on Linux: why Ubuntu's packaged Rust is too old, the C compiler you need, the Cargo command, PATH and orphan-scan tools.">
+  <meta name="twitter:description" content="Prebuilt Linux binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Static musl archives for x86_64 and aarch64.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. Many agents, one project.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another on Linux","description":"Install Another on Linux: why Ubuntu's packaged Rust is too old, the C compiler you need, the Cargo command, PATH and orphan-scan tools.","url":"https://toanother.one/docs/install/linux/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"},{"@type":"ListItem","position":4,"name":"Linux","item":"https://toanother.one/docs/install/linux/"}]}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another on Linux","description":"Prebuilt Linux binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Static musl archives for x86_64 and aarch64.","url":"https://toanother.one/docs/install/linux/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"},{"@type":"ListItem","position":4,"name":"Linux","item":"https://toanother.one/docs/install/linux/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -37,6 +37,10 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Another on Linux</h1><p class="definition">A C compiler, a current Rust from rustup, and one Cargo command.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/">macOS</a> <a href="/docs/install/linux/" aria-current="page">Linux</a> <a href="/docs/install/windows/">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
+    <section class="guide-section" aria-labelledby="archive-title">
+      <h2 id="archive-title">Prebuilt binaries from the first release</h2>
+      <p>No GitHub Release has been published yet. From the first release, use the <a href="/docs/install/#binaries-title">prebuilt installer</a> or verify and unpack a static musl archive for <code>x86_64</code> or <code>aarch64</code>. Until then, use Cargo below.</p>
+    </section>
     <section class="guide-section" aria-labelledby="prereq-title">
       <h2 id="prereq-title">1. Install a compiler, and Rust from rustup</h2>
       <p>Another needs Rust 1.88 or newer. Your distribution's package may be older: on Ubuntu 24.04, <code>apt</code> offered <code>rustc</code> 1.75 when we checked. Use rustup unless <code>rustc --version</code> already prints 1.88 or newer.</p>
@@ -65,7 +69,7 @@ command -v another</code></pre>
   another send --from alice --to bob --subject "Hello" --body "First message." --request
   another inbox --agent bob
 )</code></pre>
-      <p>Bob's inbox should show one unread message and one open request. Then <a href="/docs/getting-started/">connect hooks and MCP</a> using your real <code>~/.another</code>.</p>
+      <p>Bob should see Alice's message and its open request. Then <a href="/docs/getting-started/">connect hooks and MCP</a> using your real <code>~/.another</code>.</p>
     </section>
     <section class="guide-section" aria-labelledby="scan-title">
       <h2 id="scan-title">Linux details worth knowing</h2>
@@ -73,13 +77,9 @@ command -v another</code></pre>
       <p><strong>Wake is optional.</strong> <a href="/guides/wake-idle-agents/">Waking an idle agent</a> needs tmux, cmux or Herdr; nothing else in Another uses them.</p>
       <p><strong>Containers keep their own state.</strong> Each container has its own <code>~/.another</code> unless you mount one. To coordinate agents in different containers or machines, see <a href="/guides/agents-on-two-machines/">agents on two machines</a>.</p>
     </section>
-    <section class="guide-section" aria-labelledby="archive-title">
-      <h2 id="archive-title">When a release exists</h2>
-      <p>No release has been published. The release workflow is set up to build static musl binaries, <code>x86_64-unknown-linux-musl</code> and <code>aarch64-unknown-linux-musl</code>, which need no Rust or compiler. <code>uname -m</code> prints <code>x86_64</code> or <code>aarch64</code>. <a href="/docs/install/#verify">Verify the checksum</a> before you unpack one.</p>
-    </section>
     <section class="guide-section" aria-labelledby="tested-title">
       <h2 id="tested-title">What this page rests on</h2>
-      <p>On 5 November 2026 we ran these steps as root in a clean <code>ubuntu:24.04</code> container on arm64, without <code>sudo</code> and with rustup in its non-interactive mode. The install failed with the linker error before <code>build-essential</code> and passed after it, and the exchange then produced the expected inbox. x86_64, other distributions and a full desktop session have not been run for this page. CI runs the tests on Linux.</p>
+      <p>On 5 November 2026 we ran these steps as root in a clean <code>ubuntu:24.04</code> container on arm64, without <code>sudo</code> and with rustup in its non-interactive mode. The install failed with the linker error before <code>build-essential</code> and passed after it, and Bob then saw Alice's message. x86_64, other distributions and a full desktop session have not been run for this page. CI runs the tests on Linux.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Install Another on macOS: Rust, PATH and first message</title>
-  <meta name="description" content="Install Another on macOS: Xcode command line tools, Rust 1.88 or newer, Cargo, zsh PATH, PATH for coding clients and a first local test message.">
+  <meta name="description" content="Prebuilt macOS binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Archives for Apple Silicon and Intel.">
   <link rel="canonical" href="https://toanother.one/docs/install/macos/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Install Another on macOS: Rust, PATH and first message">
-  <meta property="og:description" content="Install Another on macOS: Xcode command line tools, Rust 1.88 or newer, Cargo, zsh PATH, PATH for coding clients and a first local test message.">
+  <meta property="og:description" content="Prebuilt macOS binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Archives for Apple Silicon and Intel.">
   <meta property="og:url" content="https://toanother.one/docs/install/macos/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Install Another on macOS: Rust, PATH and first message">
-  <meta name="twitter:description" content="Install Another on macOS: Xcode command line tools, Rust 1.88 or newer, Cargo, zsh PATH, PATH for coding clients and a first local test message.">
+  <meta name="twitter:description" content="Prebuilt macOS binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Archives for Apple Silicon and Intel.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. Many agents, one project.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another on macOS","description":"Install Another on macOS: Xcode command line tools, Rust 1.88 or newer, Cargo, zsh PATH, PATH for coding clients and a first local test message.","url":"https://toanother.one/docs/install/macos/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"},{"@type":"ListItem","position":4,"name":"macOS","item":"https://toanother.one/docs/install/macos/"}]}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Another on macOS","description":"Prebuilt macOS binaries and install.sh from the first GitHub Release, with Cargo as the fallback. Archives for Apple Silicon and Intel.","url":"https://toanother.one/docs/install/macos/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"},{"@type":"ListItem","position":4,"name":"macOS","item":"https://toanother.one/docs/install/macos/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -37,9 +37,13 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Another on macOS</h1><p class="definition">Command line tools, Rust, one Cargo command, and a PATH your coding client can see.</p><nav class="guide-nav" aria-label="Install by system"><a href="/docs/install/macos/" aria-current="page">macOS</a> <a href="/docs/install/linux/">Linux</a> <a href="/docs/install/windows/">Windows</a> <a href="/docs/install/">All install options</a></nav></div>
+    <section class="guide-section" aria-labelledby="archive-title">
+      <h2 id="archive-title">Prebuilt binaries from the first release</h2>
+      <p>No GitHub Release has been published yet. From the first release, use the <a href="/docs/install/#binaries-title">prebuilt installer</a> or verify and unpack an archive for Apple Silicon (<code>aarch64-apple-darwin</code>) or Intel (<code>x86_64-apple-darwin</code>). The install page covers quarantine and replacing an existing binary. Until then, use Cargo below.</p>
+    </section>
     <section class="guide-section" aria-labelledby="prereq-title">
       <h2 id="prereq-title">1. Get a compiler and Rust</h2>
-      <p>Another builds from source today, and there is no published release yet. Cargo needs a C toolchain to link, and Another's SQLite is compiled from bundled C source. Apple's command line tools provide it:</p>
+      <p>Cargo needs a C toolchain to link, and Another's SQLite is compiled from bundled C source. Apple's command line tools provide it:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install command line tools"><code>xcode-select --install</code></pre>
       <p>That opens a system dialog, and it reports an error if the tools are already installed. Then install Rust with the official installer, or skip this if <code>rustc --version</code> already prints 1.88 or newer:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Install Rust"><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -69,16 +73,11 @@ another --version</code></pre>
   another send --from alice --to bob --subject "Hello" --body "First message." --request
   another inbox --agent bob
 )</code></pre>
-      <p>Bob's inbox should show one unread message and one open request. Then <a href="/docs/getting-started/">connect hooks and MCP</a> using your real <code>~/.another</code>.</p>
-    </section>
-    <section class="guide-section" aria-labelledby="archive-title">
-      <h2 id="archive-title">When a release exists</h2>
-      <p>No release has been published. The release workflow is set up to build <code>aarch64-apple-darwin</code> for Apple Silicon and <code>x86_64-apple-darwin</code> for Intel; <code>uname -m</code> prints <code>arm64</code> or <code>x86_64</code> to tell you which applies. Planned binaries are unsigned, so after <a href="/docs/install/#verify">verifying the checksum</a> macOS may need the quarantine attribute removed from that binary:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Remove quarantine on a verified binary"><code>xattr -d com.apple.quarantine ./another</code></pre>
+      <p>Bob should see Alice's message and its open request. Then <a href="/docs/getting-started/">connect hooks and MCP</a> using your real <code>~/.another</code>.</p>
     </section>
     <section class="guide-section" aria-labelledby="tested-title">
       <h2 id="tested-title">What this page rests on</h2>
-      <p>The Cargo install and the exchange above ran on Apple Silicon with Rust already present. Installing the command line tools and Rust on a clean Mac has not been run for this page; those two steps follow Apple's and Rust's own instructions. CI builds the Intel target, but no one has executed that binary.</p>
+      <p>The Cargo install and the exchange above ran on Apple Silicon with Rust already present. Installing the command line tools and Rust on a clean Mac has not been run for this page; those two steps follow Apple's and Rust's own instructions. The release workflow builds the Intel binary on an Intel runner and smoke-tests the version, node initialization and agent registration.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

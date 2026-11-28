@@ -66,7 +66,20 @@ the first 80 characters of the pattern, followed by its character count when tru
 
 ## Quickstart
 
-**1. Install** with Rust 1.88 or newer:
+**1. Install.** Once the first tag and GitHub Release are published, macOS and Linux users can download the installer from the latest release:
+
+```sh
+curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &&
+  sh install.sh
+```
+
+The script installs the latest release by default. Pass a version or tag as its only argument, for example `sh install.sh v0.1.0`, to select that release once it exists. The script checks the archive's SHA-256 before unpacking and installs into `~/.local/bin`. Set `ANOTHER_INSTALL_DIR` to use another directory. Put the install directory on your `PATH`.
+
+There is no release tag or installer asset yet. The interim script is at [`main/scripts/install.sh`](https://raw.githubusercontent.com/tamler/another/main/scripts/install.sh). Until release archives exist, it prints the Cargo fallback below.
+
+You can also install with `cargo binstall --git https://github.com/tamler/another another`, or download a macOS, Linux or Windows x86_64 archive from [GitHub Releases](https://github.com/tamler/another/releases). Follow [docs/VERIFY.md](docs/VERIFY.md) before unpacking, then put `another` (or `another.exe`) on your `PATH`. On macOS, a verified download may need its quarantine flag removed with `xattr -d com.apple.quarantine ./another`.
+
+Until a release is published, or if the prebuilt installer cannot install, use Cargo with Rust 1.88 or newer:
 
 ```bash
 cargo install --locked --git https://github.com/tamler/another another
@@ -79,8 +92,6 @@ git clone https://github.com/tamler/another && cd another && cargo install --loc
 ```
 
 You can also build it and copy the binary out yourself: `cargo build --release --locked`, then copy `target/release/another` to a directory on your `PATH`. Do not run it from `target/release`. A binary run from inside a Cargo build directory counts as a development build: it will not migrate an existing home to a newer schema without `--dev-migrate` (see [docs/DOCTOR.md](docs/DOCTOR.md#upgrades-and-backups)).
-
-Once v0.1.0 is published, prebuilt binaries for macOS (arm64, x86_64) and Linux (static, x86_64, arm64) will be on [GitHub Releases](https://github.com/tamler/another/releases): unpack one and put `another` on your `PATH`. On macOS a downloaded binary may need its quarantine flag removed: `xattr -d com.apple.quarantine ./another`.
 
 On macOS, when replacing an existing `another` with a new build, **remove the old binary first** (`rm "$(command -v another)"`) and then copy the new one in. Copying over the old file in place leaves a stale code signature cached, and macOS kills the new binary on launch. `cargo install` replaces it safely.
 

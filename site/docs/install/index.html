@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Install Another - Rust CLI and MCP server for coding agents</title>
-  <meta name="description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, handle macOS quarantine and binary replacement, and verify future release archives.">
+  <meta name="description" content="Download install.sh or verified binaries from the first release. Until then, use cargo install --locked --git https://github.com/tamler/another another.">
   <link rel="canonical" href="https://toanother.one/docs/install/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Another">
   <meta property="og:title" content="Install Another - Rust CLI and MCP server for coding agents">
-  <meta property="og:description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, handle macOS quarantine and binary replacement, and verify future release archives.">
+  <meta property="og:description" content="Download install.sh or verified binaries from the first release. Until then, use cargo install --locked --git https://github.com/tamler/another another.">
   <meta property="og:url" content="https://toanother.one/docs/install/">
   <meta property="og:image" content="https://toanother.one/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,10 +18,10 @@
   <meta property="og:image:alt" content="Another. Many agents, one project.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Install Another - Rust CLI and MCP server for coding agents">
-  <meta name="twitter:description" content="Install Another with Cargo or build the Rust CLI from source. Check PATH, handle macOS quarantine and binary replacement, and verify future release archives.">
+  <meta name="twitter:description" content="Download install.sh or verified binaries from the first release. Until then, use cargo install --locked --git https://github.com/tamler/another another.">
   <meta name="twitter:image" content="https://toanother.one/twitter.png">
   <meta name="twitter:image:alt" content="Another. Many agents, one project.">
-  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Install Another","description":"Install Another with Cargo or build the Rust CLI from source. Check PATH, handle macOS quarantine and binary replacement, and verify future release archives.","url":"https://toanother.one/docs/install/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"}]}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"TechArticle","author":{"@type":"Organization","name":"The Another Authors"},"headline":"Install Another","description":"Download install.sh or verified binaries from the first release. Until then, use cargo install --locked --git https://github.com/tamler/another another.","url":"https://toanother.one/docs/install/","about":{"@id":"https://toanother.one/#application"}},{"@type":"SoftwareApplication","@id":"https://toanother.one/#application","name":"Another","url":"https://toanother.one/","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://www.apache.org/licenses/LICENSE-2.0"},{"@type":"SoftwareSourceCode","name":"Another source code","codeRepository":"https://github.com/tamler/another","programmingLanguage":"Rust","license":"https://www.apache.org/licenses/LICENSE-2.0","targetProduct":{"@id":"https://toanother.one/#application"}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Another","item":"https://toanother.one/"},{"@type":"ListItem","position":2,"name":"Docs","item":"https://toanother.one/docs/"},{"@type":"ListItem","position":3,"name":"Install","item":"https://toanother.one/docs/install/"}]}]}</script>
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
@@ -37,9 +37,21 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Install Another</h1><p class="definition">A Rust binary for coordinating coding agents. No hosted account.</p><nav class="guide-nav" aria-label="Guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/" aria-current="page">Install</a> <a href="/docs/">Full guide</a> <a href="/guides/">Task guides</a></nav></div>
+    <section class="guide-section" aria-labelledby="binaries-title">
+      <h2 id="binaries-title">Prebuilt binaries from the first release</h2>
+      <p>From the first release, run this on macOS or Linux:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Install a prebuilt binary"><code>curl -fsSLO https://github.com/tamler/another/releases/latest/download/install.sh &amp;&amp;
+  sh install.sh</code></pre>
+      <p>The script defaults to the latest release. Pass a version or tag, such as <code>sh install.sh v0.1.0</code>, to select that release once it exists. Before the first tag, the <a href="https://raw.githubusercontent.com/tamler/another/main/scripts/install.sh">interim script on main</a> prints the Cargo fallback.</p>
+      <p>The script verifies the archive and installs into <code>~/.local/bin</code>. Set <code>ANOTHER_INSTALL_DIR</code> to choose a different directory and make sure it is on your <code>PATH</code>.</p>
+      <p>You can also run <code>cargo binstall --git https://github.com/tamler/another another</code> or download an archive from <a href="https://github.com/tamler/another/releases">GitHub Releases</a>. The workflow packages macOS and static musl Linux binaries for x86_64 and arm64, plus a <a href="/docs/install/windows/">Windows x86_64 zip</a>. <a href="#verify">Verify a manual download</a> before unpacking it, then put the binary on your <code>PATH</code>.</p>
+      <p>On macOS, a verified download may need its quarantine attribute removed:</p>
+      <pre class="code-block shell" tabindex="0" aria-label="Remove quarantine on a verified binary"><code>xattr -d com.apple.quarantine ./another</code></pre>
+    </section>
     <section class="guide-section" aria-labelledby="cargo-title">
-      <h2 id="cargo-title">Install with Cargo</h2>
-      <p>You need Rust 1.88 or newer, its Cargo tool and a C compiler. Step-by-step prerequisites are on the pages for <a href="/docs/install/macos/">macOS</a> and <a href="/docs/install/linux/">Linux</a>. The <a href="/docs/install/windows/">Windows page</a> describes the untested WSL route and native limitations. The supported source install is:</p>
+      <h2 id="cargo-title">Install with Cargo today</h2>
+      <p>No GitHub Release has been published yet. Cargo is the install path that works today. It remains the fallback if a prebuilt install fails.</p>
+      <p>You need Rust 1.88 or newer, its Cargo tool and a C compiler. Step-by-step prerequisites are on the pages for <a href="/docs/install/macos/">macOS</a> and <a href="/docs/install/linux/">Linux</a>. The <a href="/docs/install/windows/">Windows page</a> covers experimental native setup and WSL 2.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Cargo installation"><code>cargo install --locked --git https://github.com/tamler/another another
 another --version
 another --help</code></pre>
@@ -55,16 +67,9 @@ cargo install --locked --path crates/another --force
 another --version</code></pre>
       <p>The build output is <code>target/release/another</code>, but treat that as a development build: do not point an MCP client at it or run it against a live <code>~/.another</code>. Install the binary (for example with <code>cargo install --path crates/another</code>, as above, or by copying it to a directory on your <code>PATH</code>) and configure MCP clients to run the installed <code>another</code> command.</p>
     </section>
-    <section class="guide-section" aria-labelledby="binaries-title">
-      <h2 id="binaries-title">Release archives</h2>
-      <p>When v0.1.0 is published, <a href="https://github.com/tamler/another/releases">GitHub Releases</a> is the place to get prebuilt archives and SHA-256 checksums. Until the release is available, use Cargo or build from source.</p>
-      <p>The release workflow targets macOS Apple Silicon and Intel, plus static musl Linux binaries for x86_64 and arm64. After publication, choose the archive for your operating system and architecture, <a href="#verify">verify its checksum and unpack it</a>, then put <code>another</code> on your <code>PATH</code>. The planned binaries are unsigned; a matching checksum establishes byte integrity against the chosen checksum file, not publisher identity or a signature. Use the project's own release source.</p>
-      <p>On macOS, a downloaded binary you have verified may need its quarantine attribute removed:</p>
-      <pre class="code-block shell" tabindex="0" aria-label="Remove quarantine on a verified binary"><code>xattr -d com.apple.quarantine ./another</code></pre>
-      <p>If the attribute is absent, this command may report that there is no such attribute. Source builds through Cargo do not need this download step.</p>
-    </section>
     <section class="guide-section" id="verify" aria-labelledby="verify-title">
       <h2 id="verify-title">Verify a release archive</h2>
+      <p>For the Windows zip, use the <a href="https://github.com/tamler/another/blob/main/docs/VERIFY.md#windows">PowerShell verification steps</a>. Release archives are unsigned. A matching SHA-256 confirms that the download matches its checksum file.</p>
       <p>Archives are named <code>another-VERSION-TARGET.tar.gz</code>. The target is <code>aarch64-apple-darwin</code>, <code>x86_64-apple-darwin</code>, <code>x86_64-unknown-linux-musl</code> or <code>aarch64-unknown-linux-musl</code>. Each archive's checksum is in a file with the same name plus <code>.sha256</code>.</p>
       <p>Put the archive and its <code>.sha256</code> file in one folder and change to that folder. Set <code>archive</code> on the first line to your file's name, then paste:</p>
       <pre class="code-block shell" tabindex="0" aria-label="Verify a release archive"><code>archive=another-0.1.0-aarch64-apple-darwin.tar.gz
