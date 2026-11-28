@@ -13,6 +13,8 @@ use crate::mail::{Importance, InboxQuery};
 use crate::requests::RequestStatus;
 use crate::store::{require_event_seq, Store};
 use crate::time::fmt_ts;
+use crate::tokens::TokenScope;
+use crate::visibility::HoldView;
 
 /// Coarse activity categories, derived from event kinds.
 #[derive(
@@ -397,14 +399,24 @@ pub(crate) fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                     .unwrap_or("")
                     .to_string()
             };
+            // A remote caller's feed drops the holder of a hold its token may not see.
+            let holder = match first.get("holder").and_then(Value::as_str) {
+                Some(holder) => holder.to_string(),
+                None if first.is_object() => "another agent in this checkout".to_string(),
+                None => String::new(),
+            };
+            let hold_id = match first.get("hold_id") {
+                Some(id) => id.clone(),
+                None if first.is_object() => Value::Null,
+                None => json!(""),
+            };
             (
                 format!(
-                    "{actor} was stopped editing {}:{} (held by {})",
+                    "{actor} was stopped editing {}:{} (held by {holder})",
                     s("project"),
                     c("path"),
-                    c("holder")
                 ),
-                json!({ "project_id": s("project_id"), "hold_id": c("hold_id") }),
+                json!({ "project_id": s("project_id"), "hold_id": hold_id }),
             )
         }
         "push.notified" => {
@@ -828,12 +840,15 @@ fn kind_matches(kinds: &[ActivityKind], kind: &str) -> bool {
     kinds.is_empty() || kinds.contains(&ActivityKind::of_event(kind))
 }
 
-/// Events after `since`, oldest first; without `since`, the newest `limit` events.
+/// Events after `since`, oldest first; without `since`, the newest `limit` events. With
+/// `view` (a remote caller), hold events are kept or rewritten by it before `limit` counts
+/// them, so a page holds only what the caller may see.
 fn read_events(
     conn: &Connection,
     since: Option<&Since>,
     kinds: &[ActivityKind],
     limit: u32,
+    view: Option<&HoldView>,
 ) -> Result<Vec<EventRow>> {
     let after_seq: Option<i64> = match since {
         Some(Since::After(id)) => Some(require_event_seq(conn, id)?),
@@ -858,13 +873,23 @@ fn read_events(
         if !kind_matches(kinds, &kind) {
             continue;
         }
+        let node_id: String = r.get(1)?;
+        let mut payload: String = r.get(5)?;
+        if let Some(view) = view {
+            if kind.starts_with("hold.") {
+                match view.hold_event(conn, &node_id, &kind, &payload)? {
+                    Some(shown) => payload = shown,
+                    None => continue,
+                }
+            }
+        }
         out.push(EventRow {
             event_id: r.get(0)?,
-            node_id: r.get(1)?,
+            node_id,
             ts: r.get(2)?,
             actor: r.get(3)?,
             kind,
-            payload: r.get(5)?,
+            payload,
         });
         if out.len() as u32 >= limit {
             break;
@@ -879,13 +904,32 @@ fn read_events(
 impl Store {
     /// Read the activity feed.
     pub fn activity(&self, query: ActivityQuery) -> Result<ActivityFeed> {
+        self.activity_scoped(query, None)
+    }
+
+    /// [`Store::activity`] for a caller that may be remote (`scope`): hold events show only
+    /// holds its token may see, and hide names it may not (see `visibility`).
+    pub fn activity_scoped(
+        &self,
+        query: ActivityQuery,
+        scope: Option<&TokenScope>,
+    ) -> Result<ActivityFeed> {
         let limit = match query.limit {
             0 => 50,
             n => n.min(MAX_LIMIT),
         };
         self.sweep()?;
         self.read(|conn| {
-            let rows = read_events(conn, query.since.as_ref(), &query.kinds, limit)?;
+            let view = scope
+                .map(|s| HoldView::of(conn, self.node_id(), s))
+                .transpose()?;
+            let rows = read_events(
+                conn,
+                query.since.as_ref(),
+                &query.kinds,
+                limit,
+                view.as_ref(),
+            )?;
             let items = rows
                 .into_iter()
                 .map(|r| item(conn, r))
@@ -903,10 +947,24 @@ impl Store {
 
     /// Summarize activity since a point in time (default: the last hour).
     pub fn activity_summary(&self, since: Option<Since>) -> Result<ActivitySummary> {
+        self.activity_summary_scoped(since, None)
+    }
+
+    /// [`Store::activity_summary`] for a caller that may be remote (`scope`): hold events,
+    /// their counts and highlights, and the live hold total cover only holds its token may
+    /// see. Agents and request totals stay node-wide.
+    pub fn activity_summary_scoped(
+        &self,
+        since: Option<Since>,
+        scope: Option<&TokenScope>,
+    ) -> Result<ActivitySummary> {
         let now = self.now();
         let since = since.unwrap_or(Since::Time(now - 3_600_000));
         self.sweep()?;
         self.read(|conn| {
+            let view = scope
+                .map(|s| HoldView::of(conn, self.node_id(), s))
+                .transpose()?;
             let since_ms = match &since {
                 Since::Time(t) => *t,
                 Since::After(id) => conn
@@ -916,7 +974,7 @@ impl Store {
                     .optional()?
                     .ok_or_else(|| Error::NotFound(format!("unknown event id {id:?}")))?,
             };
-            let rows = read_events(conn, Some(&since), &[], u32::MAX)?;
+            let rows = read_events(conn, Some(&since), &[], u32::MAX, view.as_ref())?;
             let mut counts: BTreeMap<String, u32> = BTreeMap::new();
             for r in &rows {
                 *counts
@@ -976,11 +1034,28 @@ impl Store {
                     })
                 },
             )?;
-            let live_holds: u32 = conn.query_row(
-                "SELECT count(*) FROM holds WHERE node_id = ?1 AND released_at IS NULL",
-                [self.node_id()],
-                |r| r.get(0),
-            )?;
+            let live_holds: u32 = match &view {
+                None => conn.query_row(
+                    "SELECT count(*) FROM holds WHERE node_id = ?1 AND released_at IS NULL",
+                    [self.node_id()],
+                    |r| r.get(0),
+                )?,
+                Some(view) => {
+                    let mut stmt = conn.prepare(
+                        "SELECT hold_id FROM holds WHERE node_id = ?1 AND released_at IS NULL",
+                    )?;
+                    let ids = stmt
+                        .query_map([self.node_id()], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    let mut n = 0;
+                    for id in ids {
+                        if view.shows_hold(conn, &id)? {
+                            n += 1;
+                        }
+                    }
+                    n
+                }
+            };
 
             let active: Vec<&str> = agents
                 .iter()
@@ -1016,6 +1091,18 @@ impl Store {
 
     /// Compact catch-up for one agent. Message bodies and request notes are left out.
     pub fn whats_new(&self, agent: &str, since: Option<Since>, limit: u32) -> Result<WhatsNew> {
+        self.whats_new_scoped(agent, since, limit, None)
+    }
+
+    /// [`Store::whats_new`] for a caller that may be remote (`scope`): its activity list is
+    /// [`Store::activity_scoped`].
+    pub fn whats_new_scoped(
+        &self,
+        agent: &str,
+        since: Option<Since>,
+        limit: u32,
+        scope: Option<&TokenScope>,
+    ) -> Result<WhatsNew> {
         let limit = match limit {
             0 => 10,
             n => n.min(20),
@@ -1029,17 +1116,20 @@ impl Store {
                 limit,
             },
         )?;
-        let feed = self.activity(ActivityQuery {
-            since: Some(since),
-            limit,
-            kinds: vec![
-                ActivityKind::Mail,
-                ActivityKind::Request,
-                ActivityKind::Hold,
-                ActivityKind::Resource,
-                ActivityKind::Session,
-            ],
-        })?;
+        let feed = self.activity_scoped(
+            ActivityQuery {
+                since: Some(since),
+                limit,
+                kinds: vec![
+                    ActivityKind::Mail,
+                    ActivityKind::Request,
+                    ActivityKind::Hold,
+                    ActivityKind::Resource,
+                    ActivityKind::Session,
+                ],
+            },
+            scope,
+        )?;
         let messages = inbox
             .messages
             .iter()

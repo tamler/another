@@ -94,7 +94,7 @@ A marked hold is not a reason to leave a file alone in your own checkout. With `
 
 The checkout is found from files, without running git, and kept in a node-local cache that is filled the first time a project is used. Holds on other machines are still matched by project name and reported as warnings, never conflicts (D26).
 
-`another holds --project X` and the board also list holds in other checkouts of the same repository. They are other work on that repository and will not block you. Another tells one repository from another by its `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed and the host lowercased, or, with no `origin`, by the shared git directory every worktree points at. Credentials are never stored.
+`another holds --project X` and the board also list holds in other checkouts of the same repository. They are other work on that repository and will not block you. A remote token's `hold_paths` `list` and board show only holds that reach into its projects ([REMOTE.md](REMOTE.md#what-a-connection-sees-of-holds)). Another tells one repository from another by its `origin` remote with the scheme, user name, password or token, port and `.git` suffix removed and the host lowercased, or, with no `origin`, by the shared git directory every worktree points at. Credentials are never stored.
 
 ### A hold that points into another checkout
 

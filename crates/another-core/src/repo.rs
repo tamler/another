@@ -338,7 +338,7 @@ pub(crate) fn stored_key(key: &str) -> String {
 /// A key beside an empty checkout is a row from before the checkout column that somehow
 /// already carries the current key version. It counts as never checked, so filling the
 /// column never depends on the version having been raised.
-fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>>> {
+pub(crate) fn cached(conn: &Connection, project_id: &str) -> Result<Option<Option<RepoLink>>> {
     let row: Option<(String, String, String)> = conn
         .query_row(
             "SELECT repo_key, repo_prefix, checkout FROM project_repos WHERE project_id = ?1",

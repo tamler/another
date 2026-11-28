@@ -2305,6 +2305,7 @@ mod tests {
             path: "src/a.rs".into(),
             held: held.clone(),
             unreadable: None,
+            hidden: None,
         };
         let msg = deny_message("claude@shop", std::slice::from_ref(&conflict), true, 30);
         assert_eq!(
@@ -2338,6 +2339,7 @@ mod tests {
                     ..held.clone()
                 },
                 unreadable: None,
+                hidden: None,
             })
             .collect();
         let msg = deny_message("claude@shop", &many, true, 30);
@@ -2359,6 +2361,7 @@ mod tests {
                 path: "long/".repeat(300),
                 held,
                 unreadable: None,
+                hidden: None,
             }],
             true,
             30,
@@ -2386,6 +2389,7 @@ mod tests {
                 expires_at: "2026-11-10T10:30:00.000Z".into(),
             },
             unreadable: None,
+            hidden: None,
         };
         let msg = deny_message(
             "claude\"\u{e0001}hidden",

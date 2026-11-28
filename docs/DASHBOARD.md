@@ -55,7 +55,7 @@ Holds and requests that belong to another node are not yours to release or expir
 
 `another serve --auth` does not mount `/ui`. A tunnel in front of that port would otherwise publish the whole node, and loopback is not proof of a local human once a tunnel is involved.
 
-`--dashboard` together with `--auth`, still on loopback, serves a **read-only** page and **omits message bodies**. Actions are not available. The process prints a warning, because a tunnel to that port would expose the redacted view.
+`--dashboard` together with `--auth`, still on loopback, serves a **read-only** page and **omits message bodies**. Actions are not available. The process prints a warning, because a tunnel to that port would expose the redacted view. That view is node-wide: unlike a token's tools and feed ([REMOTE.md](REMOTE.md#what-a-connection-sees-of-holds)), it is not confined to any project globs. Treat it as a separate trust boundary, not as a privacy guarantee.
 
 A federation-only listener (`--federation` without `--auth`) never mounts the dashboard, even with `--dashboard`. With both `--federation` and `--auth`, dashboard routes require a bearer token as well as the loopback Host check. Use a separate local dashboard listener for browser access.
 

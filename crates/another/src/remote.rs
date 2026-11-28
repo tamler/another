@@ -321,6 +321,8 @@ pub async fn activity(
     Query(params): Query<ActivityParams>,
 ) -> Response {
     let peer = peer.map(|p| p.0);
+    // A remote peer sees hold events only for holds its token may see.
+    let scope = peer.as_ref().map(|p| p.scope.clone());
     let query_store = store.clone();
     let detail = format!(
         "since={:?} limit={:?} kinds={:?}",
@@ -340,11 +342,14 @@ pub async fn activity(
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().parse::<ActivityKind>())
             .collect::<another_core::Result<Vec<_>>>()?;
-        query_store.activity(ActivityQuery {
-            since,
-            limit: params.limit.unwrap_or(50),
-            kinds,
-        })
+        query_store.activity_scoped(
+            ActivityQuery {
+                since,
+                limit: params.limit.unwrap_or(50),
+                kinds,
+            },
+            scope.as_ref(),
+        )
     })
     .await;
     let (status, body, outcome) = match result {

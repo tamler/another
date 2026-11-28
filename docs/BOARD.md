@@ -84,9 +84,9 @@ Because nothing is swept, a hold past its expiry is left out by its expiry time,
 
 A bearer token or OAuth grant must pass a `project` inside its globs, and gets a **confined** board (`confined: true`):
 
-- **That one project only.** Sibling checkouts are left out, because their paths may be outside the globs.
+- **Holds of its checkout that the connection may see.** Holds, edits and stopped edits are read from every project of the named project's checkout. Each is kept only when its path reaches into a project the token allows ([REMOTE.md](REMOTE.md#what-a-connection-sees-of-holds)). A parent project's hold that covers the project is shown in the parent's own section. A section appears only for a project with something shown. Sibling checkouts are left out unless the globs allow them. The scan cap counts only events the connection may see. The read is also bounded at 50,000 events read, newest first, and reaching that bound sets `history_truncated`. Checkout links come from the repository cache as it is, so a project no command has linked yet shows only its own holds.
 - **Agents.** Only agents registered to that project are listed.
-- **Stopped edits.** A stopped edit in the project is shown with the stopped agent and the path. If the holder's project is outside the view, `holder`, `holder_project` and `pattern` are `null`.
+- **Stopped edits.** A stopped edit is shown with the stopped agent and the path when the path is one the connection may see. `holder`, `holder_project` and `pattern` are `null` when the blocking hold is one it may not see.
 - **Requests.** A request is listed when its sender, a recipient or its owner is registered to the project. Participants registered elsewhere are not named:
   - a hidden sender is `null`;
   - hidden recipients are counted in `to_hidden`;

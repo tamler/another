@@ -293,14 +293,26 @@ Bearer tokens and OAuth grants follow the same rules.
 | Tools | Rule |
 |---|---|
 | `whats_new`, `fetch_inbox`, `acknowledge`, `claim_request`, `heartbeat`, `send_message` (`from`), `resource_borrow` / `release` / `heartbeat` | Must act as the connection's agent; the agent is filled in when omitted |
-| `hold_paths` | That agent, and a `project` matching the globs (required) |
+| `hold_paths` | That agent, and a `project` matching the globs (required). `list` shows only holds the connection may see ([below](#what-a-connection-sees-of-holds)) |
 | `ensure_project`, `resource_register` (with a project) | Project must match the globs |
 | `register_agent` | Only the connection's own identity |
 | `threads` | Only threads the agent sent or received in |
-| `activity_feed`, `activity_summarize`, `resource_find` | Node-wide, read-only awareness (no message bodies) |
-| `work_board` | A `project` matching the globs (required). Returns a confined board: that one project, no sibling checkouts, and agents, projects and hold patterns from other projects hidden ([BOARD.md](BOARD.md#remote-connections)) |
+| `activity_feed`, `activity_summarize`, `resource_find` | Read-only awareness, no message bodies. Hold events and hold counts cover only holds the connection may see; everything else is node-wide ([below](#what-a-connection-sees-of-holds)) |
+| `work_board` | A `project` matching the globs (required). Returns a confined board: agents and requests of that one project, holds of its checkout that the connection may see, other names hidden ([BOARD.md](BOARD.md#remote-connections)) |
 | `orphans_list` | Lapsed registrations only; the process scan is never run for remote peers |
 | `resource_reap` | **Never** (remote reaping is disabled) |
+
+### What a connection sees of holds
+
+A connection sees a hold when the hold reaches into a project its globs allow. Both are read from the top of their checkout. A hold in the project itself counts, and so does a hold in a parent project of the same checkout that covers some of the project's files, such as `**` or `sub/src/**` over a project at `sub`. A hold elsewhere in that parent does not. A hold in another checkout of the same repository (a worktree or a clone) is not shown unless the globs allow that checkout too. Letter case follows the volume, as it does for conflicts. A stored pattern that cannot be read counts as covering all of its project. Holds of other nodes are never shown. The rule reads the repository cache as it is, like the board, and never refreshes it. A project that no command has linked to its checkout yet, or one linked by an older build, sees only its own holds until it is used (an edit or a hold command fills the cache). A parent's covering hold stays hidden from it until then. That errs toward showing less.
+
+The rule applies to `hold_paths` `list`, `activity_feed`, `GET /activity`, `activity_summarize` (hold counts, highlights and `live_holds`), the activity list in `whats_new`, and `work_board`. A hold event the connection may not see is left out before `limit` is applied, so a page and `next_since` hold only what it may see. Within a shown event, other hold ids, the holder of a hidden hold, and error text are removed. A hold event that the server does not recognize, or whose payload it cannot read, is left out.
+
+Conflicts are still judged against every hold of the checkout: `acquire` and `check` refuse exactly as before. When the blocking hold is one the connection may not see, the conflict names nothing. It carries the requested `path`, empty `held` fields, and `hidden`: "the requested path is held by another agent in this checkout". `hidden` is a new optional field of each conflict and warning, absent unless set. `held.exclusive` is kept, because it names nobody and tells the caller whether a shared hold could still be taken beside the blocker.
+
+A "Hold free" notice, which the edit hook's wait sends when a blocker ends, follows the same rule, judged from the waiting agent's project. When an ended blocker is one that project may not see, the notice names no hold ids, and it is addressed from the waiting agent to itself instead of from the holder (Another has no system mailbox). A warning about another node's hold carries `hidden`: "the requested path overlaps a hold on another node", with no names. Holds of other nodes that were not compared are one count with an empty node name.
+
+Everything else in the feed and the summary is still node-wide: the agents list, request totals, and mail, request, session, resource and project events (`project.ensured` prints each project's path). The redacted dashboard (`--dashboard` with `--auth`) is node-wide too, and a tunnel can make remote traffic look like loopback ([DASHBOARD.md](DASHBOARD.md#authenticated-and-remote-servers)). Keep tokens to agents you would show those.
 
 `whats_new` is the call a chat app should make first. It returns unread subjects, open requests and a short activity list for that one agent, and a `next` field. Message bodies are not included. If nothing is waiting, `next` says so and the app should stop.
 
