@@ -238,5 +238,5 @@ fn an_empty_board_says_so() {
     env.ok(&["init"]);
     let human = env.ok(&["board"]);
     assert!(human.contains("No live holds and no edits in this window."));
-    assert!(human.contains("none with holds, unread mail, acknowledgements or requests"));
+    assert!(human.contains("none with holds, unread messages, acknowledgements or requests"));
 }

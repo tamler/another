@@ -768,7 +768,7 @@ fn wake_one_of_all(
     let mut plan = WakePlan::new(agent);
     let waiting = waiting(store, agent)?;
     if waiting.is_none() && !opts.force {
-        plan.skipped = Some("no unannounced mail".into());
+        plan.skipped = Some("no unannounced messages".into());
         return Ok(plan);
     }
     let line = match opts.message.clone().or(default_message(store, agent)?.0) {

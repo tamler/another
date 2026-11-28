@@ -43,7 +43,7 @@
     </div>
     <section class="guide-section" aria-labelledby="loop-title">
       <h2 id="loop-title">The loop</h2>
-      <p>Each session registers with its own name. If two Claude Code sessions both show up as <code>claude@repo</code>, their mail and holds collapse together. That one bit me.</p>
+      <p>Each session registers with its own name. If two Claude Code sessions both show up as <code>claude@repo</code>, their messages and holds collapse together. That one bit me.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Register two agents"><code>another agent register claude-a <span class="token">--program</span> claude <span class="token">--project</span> .
 another agent register codex-b <span class="token">--program</span> codex <span class="token">--project</span> .</code></pre>
       <p>Before a session edits a file another agent might touch, it takes a hold. TTL is seconds. Exclusive is the default.</p>
@@ -52,14 +52,14 @@ another agent register codex-b <span class="token">--program</span> codex <span 
       <p>Handoffs are requests, not a scratch markdown file. I used the markdown file. It went stale the same day.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Open a request"><code>another send <span class="token">--from</span> claude-a <span class="token">--to</span> codex-b <span class="token">--subject</span> "Review the parser" <span class="token">--body</span> "Error paths look wrong." <span class="token">--request</span>
 another inbox <span class="token">--agent</span> codex-b</code></pre>
-      <p>Hooks are what make the second session notice: a digest at session start, and a one-line notice after its next tool call when mail lands mid-task. <code>another hook install --client all</code> edits user-global client config, keeps a backup, and leaves hooks you already had. Run it with <code>--dry-run</code> first. Codex will not run the new hooks until you trust them in <code>/hooks</code>.</p>
+      <p>Hooks are what make the second session notice: a digest at session start, and a one-line notice after its next tool call when a message arrives mid-task. <code>another hook install --client all</code> edits user-global client config, keeps a backup, and leaves hooks you already had. Run it with <code>--dry-run</code> first. Codex will not run the new hooks until you trust them in <code>/hooks</code>.</p>
     </section>
     <section class="guide-section" aria-labelledby="wrong-title">
       <h2 id="wrong-title">Things I had wrong</h2>
       <dl class="clients">
         <div class="client"><dt>Wake</dt><dd>I pointed <code>another wake</code> at an agent that was mid-edit. Nothing useful happened. Wake types into an idle tmux, cmux, or Herdr target, and it skips the agent when the inbox is empty. It does not cut into a running turn.</dd></div>
         <div class="client"><dt>Reap</dt><dd><code>another reap</code> without <code>--confirm</code> is a plan. With <code>--confirm</code> it signals a process on that machine. A remote token cannot do it. I do not want a peer box killing a local server.</dd></div>
-        <div class="client"><dt>Federation</dt><dd>The hub I would host can read mail it relays. There is no end-to-end encryption. Requests do not move nodes. I say that in the docs because it is easy to skim past.</dd></div>
+        <div class="client"><dt>Federation</dt><dd>The hub I would host can read messages it relays. There is no end-to-end encryption. Requests do not move nodes. I say that in the docs because it is easy to skim past.</dd></div>
         <div class="client"><dt>Dashboard</dt><dd><code>another dashboard</code> opens the loopback page. <code>another serve</code> also has it at <code>/ui</code> when it is not an authenticated remote server. OAuth for ChatGPT and Claude.ai merged after I first wrote this page; a grant exists only after <code>another oauth approve</code> on this machine. Both are on the <a href="/changelog/">changelog</a>.</dd></div>
       </dl>
     </section>

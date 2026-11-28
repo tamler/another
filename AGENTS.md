@@ -4,9 +4,9 @@
 
 ## Status
 
-The seven original build milestones are complete and on `main` (they are not the scope ids M1 to M10 below): local core (tamler/another#1), mail checking and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
+The seven original build milestones are complete and on `main` (they are not the scope ids M1 to M10 below): local core (tamler/another#1), message notices and the activity feed (#2), the resource registry (#3), the authenticated remote peer (#4), federation (#5), wake adapters and release builds (M6), and hosted connectors (#99). Their briefs are in this file's git history and their decisions are D1 to D81.
 
-The current work is **v0.1.0, the single-node queue release**, approved by the project owner on 17 Nov 2026. Target tag date: 1 Dec 2026.
+The current work is **v0.1.0, the single-node queue release**, approved by the project owner on 17 Nov 2026. Target tag date: 1 Dec 2026. This is not a v1; improvements continue. Foundation work before the tag, including prebuilt binaries, remaining security fixes in code, and one lease model, is listed in [docs/ROADMAP.md](docs/ROADMAP.md) (D105 to D109).
 
 ## v0.1.0, in scope
 
@@ -17,7 +17,7 @@ The scope page is the source of truth; this is the short form. Every item has an
 - **M3** Upgrade safety: backup before migrate, refuse unknown schemas, doctor flags a build and database mismatch.
 - **M4** Path holds: existing behaviour, admitted fixes only.
 - **M5** Transport adapter interface (`wake`, `status`, `list`), the Herdr adapter and a generic command adapter.
-- **M6** Hook packs for Claude Code and Codex show the inbox and the queue at each turn. The queue lines are printed at session start and at a prompt, never mid-task, and only a name the owner gave its own limit is told that an item is ready (D96, [docs/HOOKS.md](docs/HOOKS.md#queue-lines)).
+- **M6** Hook packs for Claude Code and Codex show messages and queue updates at each turn. The queue lines are printed at session start and at a prompt, never mid-task, and only a name the owner gave its own limit is told that an item is ready (D96, [docs/HOOKS.md](docs/HOOKS.md#queue-lines)).
 - **M7** One place that lists what needs the owner; the read-only scan for lapsed resources and unregistered listeners in `another doctor`.
 - **M8** Daemon on macOS and Linux.
 - **M9** Today's hub and spoke between the owner's Mac and VPS, with hub backups.
@@ -47,7 +47,7 @@ Apache-2.0; agent names unique per project; hooks are the fallback everywhere an
 
 ## Explicitly OUT of scope
 
-See the non-goals in [docs/VISION.md](docs/VISION.md) and the cut list in [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md). In short: teams and hosted multi-user setups, a plugin platform, mesh federation, an adapter per multiplexer, auto-reap, end-to-end mail encryption and a TUI.
+See the non-goals in [docs/VISION.md](docs/VISION.md) and the cut list in [docs/V0.1.0-SCOPE.md](docs/V0.1.0-SCOPE.md). In short: teams and hosted multi-user setups, a plugin platform, mesh federation, an adapter per multiplexer, auto-reap, end-to-end message encryption and a TUI.
 
 ## Keep the README status current
 

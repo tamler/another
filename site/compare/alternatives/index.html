@@ -60,7 +60,7 @@
         <div class="client"><dt><a href="https://code.claude.com/docs/en/agent-teams">Agent teams</a></dt><dd>Several Claude Code sessions with a lead, a shared task list and direct messages. Experimental and off by default, with one team per session and documented limits on resuming.</dd></div>
         <div class="client"><dt><a href="https://code.claude.com/docs/en/cross-session-messaging">Cross-session messaging</a></dt><dd>Passes findings between Claude Code sessions you run yourself.</dd></div>
       </dl>
-      <p>Another fits when the agents are different programs, such as Claude Code and Codex, or when you want mail and leases to outlast a session in a database you can inspect. Other clients may have similar features; we have not surveyed them here.</p>
+      <p>Another fits when the agents are different programs, such as Claude Code and Codex, or when you want messages and leases to outlast a session in a database you can inspect. Other clients may have similar features; we have not surveyed them here.</p>
     </section>
     <section class="guide-section" aria-labelledby="mcp-title">
       <h2 id="mcp-title">Other MCP coordination tools</h2>
@@ -80,7 +80,7 @@
         <div class="client"><dt><a href="https://github.com/arumwu/agentrelay">AgentRelay</a></dt><dd>Task leases are exclusive while they are active. File-scope claims warn. The README says they do not stop an edit made outside MCP. It also documents a guarded tmux read and send.</dd></div>
         <div class="client"><dt><a href="https://github.com/LevDomasnih/coordinaut">Coordinaut</a></dt><dd>Claim a task and a file scope, then heartbeat. The README argues agents should not coordinate by racing to edit one markdown file. The markdown it generates is a view. The log is the state.</dd></div>
       </dl>
-      <p>If you want mail across Claude Code and Codex, plus a hook that stops a client edit to a held file, that is the job I built Another for. If you need every write stopped, including one from a shell, none of these do that; use separate checkouts. Read the current hook docs for your client before you pick one. I have not measured which one is faster.</p>
+      <p>If you want messaging across Claude Code and Codex, plus a hook that stops a client edit to a held file, that is the job I built Another for. If you need every write stopped, including one from a shell, none of these do that; use separate checkouts. Read the current hook docs for your client before you pick one. I have not measured which one is faster.</p>
     </section>
     <section class="guide-section" aria-labelledby="orchestrator-title">
       <h2 id="orchestrator-title">Orchestrators</h2>
@@ -93,14 +93,14 @@
         <li><strong>You run one agent at a time.</strong> There is nobody to coordinate with.</li>
         <li><strong>You need a real lock.</strong> The edit hook stops a client edit to a held file, but an edit from a shell command still gets through, and nothing guards a commit. Use separate checkouts and review the merge.</li>
         <li><strong>You need instant delivery.</strong> Hooks fire at session start, after the next tool call and on the next prompt. A loopback daemon wakes idle Herdr agents, and <a href="/guides/wake-idle-agents/">wake adapters</a> can type into an idle terminal, but nothing interrupts an agent mid-task.</li>
-        <li><strong>You need end-to-end encrypted mail.</strong> The database is ordinary SQLite, and a federation hub can read what it relays.</li>
+        <li><strong>You need end-to-end encrypted messages.</strong> The database is ordinary SQLite, and a federation hub can read what it relays.</li>
         <li><strong>You want a signed, packaged release.</strong> There is no release yet, so you build from source, and planned binaries are unsigned.</li>
       </ul>
     </section>
     <section class="guide-section" aria-labelledby="fit-title">
       <h2 id="fit-title">When it does fit</h2>
       <p>You run two or more different coding clients side by side, you are tired of being the relay, and you are comfortable with a young open source tool. <a href="/guides/coordinate-local-agents/">Try it in temporary state</a>, which changes no client configuration, before you commit to anything.</p>
-      <p class="quiet">Inbox and orchestrator notes reviewed 5 November 2026. File-claim notes reviewed 10 November 2026, from the linked READMEs. Projects change. Read them again before you pick one.</p>
+      <p class="quiet">Messaging and orchestration notes reviewed 5 November 2026. File-claim notes reviewed 10 November 2026, from the linked READMEs. Projects change. Read them again before you pick one.</p>
     </section>
   </main>
   <footer class="footer wrap"><p>Apache-2.0. No product telemetry or paid tier.</p><nav aria-label="Project"><a href="/docs/faq/">FAQ</a> <a href="/docs/concepts/">Concepts</a> <a href="https://github.com/tamler/another">Source</a> <a href="https://github.com/tamler/another/blob/main/LICENSE">License</a></nav></footer>

@@ -2363,8 +2363,8 @@ fn wake_all_runs_one_wake_pass() {
             .clone()
     };
     // Skips are explained.
-    assert_eq!(plan("claude@shop")["skipped"], "no unannounced mail");
-    assert_eq!(plan("claude@idle")["skipped"], "no unannounced mail");
+    assert_eq!(plan("claude@shop")["skipped"], "no unannounced messages");
+    assert_eq!(plan("claude@idle")["skipped"], "no unannounced messages");
     assert!(
         plan("byhand")["skipped"]
             .as_str()
@@ -2374,7 +2374,7 @@ fn wake_all_runs_one_wake_pass() {
     );
     let text = fx.run(&["wake", "--all"]).1;
     assert!(
-        text.contains("skipped claude@shop: no unannounced mail"),
+        text.contains("skipped claude@shop: no unannounced messages"),
         "{text}"
     );
 

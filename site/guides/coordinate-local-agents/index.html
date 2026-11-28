@@ -37,12 +37,12 @@
   </header>
   <main class="wrap" id="main" tabindex="-1">
     <div class="guide-hero"><h1>Coordinate local coding agents</h1><p class="definition">Several agents, one project, one machine. Another is a background messaging system that helps them work in parallel, reduce edit conflicts and share resources.</p><nav class="guide-nav" aria-label="Setup guides"><a href="/docs/getting-started/">Getting started</a> <a href="/docs/install/">Install</a> <a href="/docs/">Full guide</a></nav></div>
-    <p>Another also works across machines through federation or remote peers. A federation hub can read relayed mail, and remote peers cannot reap.</p>
-    <p>Messages are one part of coordination. Path holds help prevent covered edit conflicts, hooks announce new mail after a tool call, and resource records help agents find services already running. Holds are not disk locks: shell edits bypass the guard, Cursor has no edit guard, and hooks can fail open. This guide starts with a message exchange in isolated state.</p>
+    <p>Another also works across machines through federation or remote peers. A federation hub can read relayed messages, and remote peers cannot reap.</p>
+    <p>Messages are one part of coordination. Path holds help prevent covered edit conflicts, hooks announce new messages after a tool call, and resource records help agents find services already running. Holds are not disk locks: shell edits bypass the guard, Cursor has no edit guard, and hooks can fail open. This guide starts with a message exchange in isolated state.</p>
     <section class="guide-section" aria-labelledby="storage">
       <h2 id="storage">What stays on your machine</h2>
-      <p>Another stores agent registration, mail, requests, path holds and resource coordination in local SQLite state. The default home is <code>~/.another</code>; <code>ANOTHER_HOME</code> selects a different directory. CLI mail works without an always-on daemon or hosted account.</p>
-      <p>Source installation needs Rust and access to dependencies. Local CLI mail operations use the node's data. Your coding client retains its own model-provider and network settings.</p>
+      <p>Another stores agent registration, messages, requests, path holds and resource coordination in local SQLite state. The default home is <code>~/.another</code>; <code>ANOTHER_HOME</code> selects a different directory. CLI messaging works without an always-on daemon or hosted account.</p>
+      <p>Source installation needs Rust and access to dependencies. Local CLI messaging commands use the node's data. Your coding client retains its own model-provider and network settings.</p>
     </section>
     <section class="guide-section" aria-labelledby="demo">
       <h2 id="demo">Try an isolated local exchange</h2>
@@ -63,12 +63,12 @@ another thread MESSAGE_ID
 another activity --summary
 another status
 exit</code></pre>
-      <p>This creates demo mail without installing hooks or starting a server. The <a href="#recorded">recorded run</a> below shows what each step prints.</p>
+      <p>This creates demo messages without installing hooks or starting a server. The <a href="#recorded">recorded run</a> below shows what each step prints.</p>
     </section>
     <section class="guide-section" aria-labelledby="recorded">
       <h2 id="recorded">What the run prints</h2>
       <p>Captured from a source build reporting <code>another 0.1.0</code> at <code>5ec0a58</code>, not a tagged release (the Rust source on <code>main</code> at <code>d474de9</code> differs only in test files), against a temporary project named <code>shop</code>, with no hooks and no server. Ids and timestamps are as recorded. The same walkthrough is in the repository at <a href="https://github.com/tamler/another/blob/main/docs/INBOX.md">docs/INBOX.md</a>.</p>
-      <p><code>--ack</code> asks the recipient to acknowledge. No request is opened, so <code>send</code> prints one id. Fetching the inbox twice changes nothing: the message is still <code>new</code> and <code>awaiting ack</code> is still 1.</p>
+      <p><code>--ack</code> asks the recipient to acknowledge. No request is opened, so <code>send</code> prints one id. Listing messages twice changes nothing: the message is still <code>new</code> and <code>awaiting ack</code> is still 1.</p>
       <pre class="code-block shell" tabindex="0" aria-label="Send with an ack request and fetch twice"><code><span class="command">$ another send --from writer --to reader --subject "Parser review" --body "Please check the error paths." --ack</span>
 <span class="output">sent 01M77MXG3ADR38R971JAMA7KPV to reader@shop</span>
 <span class="command">$ another inbox --agent reader --unread</span>
@@ -119,14 +119,14 @@ exit</code></pre>
     </section>
     <section class="guide-section" aria-labelledby="inspect">
       <h2 id="inspect">Read, acknowledge and follow a thread</h2>
-      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread mail. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--mark-read-only</code> marks a read without acknowledgement. MCP uses <code>acknowledge</code> with <code>ack: false</code> for the same state change. Read and ack state is per recipient, and an ack is receipt only: send work with <code>--request</code> so an agent can claim it and become its owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
+      <p>In your chosen node, <code>another inbox --agent reader</code> lists messages and relevant requests. Add <code>--unread</code> to filter unread messages. Fetching does not mark it read. Use <code>another ack</code> with the actual message ID and acting agent to record receipt; <code>--mark-read-only</code> marks a read without acknowledgement. MCP uses <code>acknowledge</code> with <code>ack: false</code> for the same state change. Read and ack state is per recipient, and an ack is receipt only: send work with <code>--request</code> so an agent can claim it and become its owner (<a href="/guides/hand-off-tasks/">hand off a task</a>).</p>
       <p><code>another reply</code> with the message ID and <code>--from</code> answers in the same thread. <code>another threads --agent reader</code> lists conversations; <code>another thread</code> followed by an actual thread ID shows its messages. <code>another activity --summary</code> provides counts and highlights without message bodies. Keep the same home when following up on a message.</p>
-      <p>Give sessions the same home and intended project to share state. <a href="/guides/mcp-agent-messaging/">Connect MCP</a> for mail tools and <a href="/guides/claude-code-codex/">client hooks</a> for notices.</p>
+      <p>Give sessions the same home and intended project to share state. <a href="/guides/mcp-agent-messaging/">Connect MCP</a> for messaging tools and <a href="/guides/claude-code-codex/">client hooks</a> for notices.</p>
     </section>
     <section class="guide-section" aria-labelledby="privacy">
       <h2 id="privacy">Local storage has a trust boundary</h2>
-      <p>Another has no product telemetry or paid tier. Bodies stay out of session digests and the activity feed, but remain in the mail store. Access to that directory and the clients you connect are part of your trust boundary.</p>
-      <p>Remote access and federation add network paths you configure. Another has no built-in TLS; a self-hosted federation hub can read relayed bodies. This is not an end-to-end encrypted mailbox. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Remote authentication</a> and <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">federation permissions</a> explain the limits, and <a href="/guides/agents-on-two-machines/">agents on two machines</a> walks through a hub.</p>
+      <p>Another has no product telemetry or paid tier. Bodies stay out of session digests and the activity feed, but remain in the message store. Access to that directory and the clients you connect are part of your trust boundary.</p>
+      <p>Remote access and federation add network paths you configure. Another has no built-in TLS; a self-hosted federation hub can read relayed bodies. Message bodies are readable by the hub. <a href="https://github.com/tamler/another/blob/main/docs/REMOTE.md">Remote authentication</a> and <a href="https://github.com/tamler/another/blob/main/docs/FEDERATION.md">federation permissions</a> explain the limits, and <a href="/guides/agents-on-two-machines/">agents on two machines</a> walks through a hub.</p>
     </section>
     <section class="guide-section" aria-labelledby="related"><h2 id="related">Related guides</h2><nav class="guide-nav" aria-label="Related task guides"><a href="/guides/claude-code-codex/">Claude Code + Codex</a> <a href="/guides/mcp-agent-messaging/">MCP messaging</a> <a href="/guides/avoid-agent-file-conflicts/">File holds</a></nav></section>
   </main>
