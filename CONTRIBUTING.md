@@ -9,7 +9,7 @@ Thanks for helping. Another is free and open source, always: every feature ships
    - Prior art listed in SPEC is for ideas only.
 2. **Vendor-neutral.** Claude Code, Codex, Grok CLI, Grok Bot and Cursor are treated equally. Don't tune behaviour for one vendor; when clients differ, handle the difference explicitly and document it.
 3. **Safe defaults.**
-   - Bind to loopback unless authentication is on.
+   - Bind to loopback by default. A non-loopback bind requires both `--auth` and `--allow-remote-bind`.
    - Never terminate a process without a human confirmation flag.
    - Never allow remote reaping.
    - Agents act only on their own node.
@@ -25,7 +25,8 @@ git clone https://github.com/tamler/another
 ```
 
 ```bash
-cd another && cargo test
+cd another
+cargo test -p another-core
 ```
 
 The workspace has two crates:
@@ -39,7 +40,9 @@ Schema changes are new entries at the end of `MIGRATIONS` in `crates/another-cor
 
 ## Before you open a PR
 
-Run what CI runs:
+A PR needs a ready queue item and must name its scope ID. See [AGENTS.md](AGENTS.md) for admission rules and [the queue guide](docs/QUEUE.md) for commands.
+
+CI runs the following checks. The full `cargo test` suite needs a GitHub-hosted Linux or Windows Actions runner; see the local test commands below.
 
 ```bash
 cargo fmt --all -- --check
@@ -57,9 +60,30 @@ cargo test
 cargo +1.88 check --workspace --all-targets --locked
 ```
 
+Tests guarded by `require_hosted_runner` in `crates/another/tests/common/hosted_ci.rs` can stop child processes or signal process groups. They deliberately fail outside GitHub-hosted Linux and Windows Actions runners. These tests are in the `command_transport`, `transport`, `dashboard`, `resources` (MCP reaping), `push`, `wake`, `daemon` and `examples` (`federation_hub_two_spokes`) integration targets. Leave them to hosted CI; do not set runner environment variables to bypass the guard.
+
+To run the rest locally, run all core tests and the binary's library and integration tests except those targets, then run the remaining example tests:
+
+```bash
+cargo test -p another-core
+local_tests=""
+for test_file in crates/another/tests/*.rs; do
+    test_name=$(basename "$test_file" .rs)
+    case "$test_name" in
+        command_transport|transport|dashboard|resources|push|wake|daemon|examples) continue ;;
+    esac
+    local_tests="$local_tests --test $test_name"
+done
+cargo test -p another --lib $local_tests
+cargo test -p another --test examples -- --skip federation_hub_two_spokes
+```
+
+This conservative selection also omits local-safe tests in the excluded targets. Run those individually by test name when needed, after checking that they do not call `require_hosted_runner` through a fixture.
+
 - Add tests for new behaviour. Core logic gets tests in `crates/another-core/tests`; CLI, MCP, hooks and HTTP get tests in `crates/another/tests`, which run the real binary, with a temporary `HOME` / `ANOTHER_HOME` where relevant.
 - Keep the **Status** section of [README.md](README.md) and the current [AGENTS.md](AGENTS.md) brief accurate when milestone progress changes.
 - Dependency updates must keep building on Rust 1.88. `resolver = "3"` in `Cargo.toml` makes `cargo update` prefer compatible versions.
+- Copy lint: `python3 scripts/check-copy.py`.
 - Website edits: `sh site/build.sh` with Python 3. That regenerates `site/dist`, checks links and SEO metadata, and runs `scripts/check-copy.py` (em dashes, en dashes, and banned phrases in `site/`, `docs/`, and CLI strings in `crates/another/src/cli.rs`). Deploying the site is a maintainer action.
 
 ## Releases

@@ -9,11 +9,11 @@ Short definitions of the words Another uses, with the places that explain each o
 - **Agent**: a named identity that sends and receives, such as `codex@shop`. Names are unique per project. Another records the identity; it does not start or run the program behind it.
 - **Address**: `name@project`. A bare `name` resolves only while one agent on the node has it. `name@project@node` reaches an agent on a paired node. [ADDRESSING.md](ADDRESSING.md).
 
-## Mail
+## Messages
 
-- **Message**: an immutable note with a subject, a body and recipients. Each recipient has its own read and acknowledgement state. Fetching an inbox changes neither.
+- **Message**: an immutable note with a subject, a body and recipients. Each recipient has its own read and acknowledgement state. Listing messages changes neither.
 - **Thread**: a conversation of messages. A reply stays in the thread of the message it answers.
-- **Acknowledgement (ack)**: a recorded receipt, made with `another ack <message-id>` or the `acknowledge` tool, by one agent for itself. It says the mail was seen. It says nothing about the work. [REQUESTS.md](REQUESTS.md).
+- **Acknowledgement (ack)**: a recorded receipt, made with `another ack <message-id>` or the `acknowledge` tool, by one agent for itself. It says the message was seen. It says nothing about the work. [REQUESTS.md](REQUESTS.md).
 - **Request**: a claimable piece of work opened alongside a message with `--request` or `--due`. It has at most one owner and a status: `open`, `claimed`, `done`, `stale` or `cancelled`. Requests stay on one node (D24). [REQUESTS.md](REQUESTS.md).
 - **Owner**: the agent that claimed a request. Only the owner can release or complete a claimed request; only the creator can cancel it.
 - **Due time**: an optional deadline set in seconds with `--due`. Past it, an open or claimed request becomes `stale` on its own and anyone may claim it, including from its owner. A request without a due time never goes stale by itself; only a human confirming Expire in the local dashboard can mark it stale (D42).
@@ -49,20 +49,20 @@ Short definitions of the words Another uses, with the places that explain each o
 
 ## Awareness
 
-- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). Hooks tell a session about new mail at each of the first three, and about the queue at session start and on a prompt, with no transport. [HOOKS.md](HOOKS.md).
-- **Digest**: the short text a hook gives a session at its start: the inbox counts, the queue lines (an item the session holds; for a seated name, that an item is ready), then unread subjects and requests under a sentence that says other agents wrote them. No activity summary. Never message bodies or queue item titles.
-- **Activity feed**: who did what: sessions, mail subjects, requests, holds and resources. `another activity`.
+- **Hook**: a user-global entry in a coding client's config that runs Another at session start, on each prompt, after each tool call and at session end, and before each file edit in Claude Code, Codex CLI and Grok CLI (Cursor has no edit hook). Hooks tell a session about new messages at each of the first three, and about the queue at session start and on a prompt, with no transport. [HOOKS.md](HOOKS.md).
+- **Digest**: the short text a hook gives a session at its start: the message counts, the queue lines (an item the session holds; for a seated name, that an item is ready), then unread subjects and requests under a sentence that says other agents wrote them. No activity summary. Never message bodies or queue item titles.
+- **Activity feed**: who did what: sessions, message subjects, requests, holds and resources. `another activity`.
 - **Event log**: the signed, append-only record behind everything. Query tables are projections of it, and it is what federation syncs. [SPEC.md](SPEC.md).
 - **Sweep**: the pass that records expired holds, marks overdue requests stale and expires lapsed leases. `another sweep` runs it once; `another serve` runs it every 30 seconds; `another requests` and `another inbox` run it before they list. The **queue sweep** is a separate pass that releases queue claims with no sign of life for the grace period; it runs in `another sweep`, in `another serve` and in other agents' hooks, heartbeats and `queue next`, and never before a read ([QUEUE.md](QUEUE.md)).
 - **Transport**: a tool that runs agent sessions, reached through one interface with three operations: `wake`, `status` and `list`. This build has the Herdr transport. [WAKE.md](WAKE.md).
-- **Wake**: one line delivered into an idle agent's session through a transport, with an answer on whether it was delivered and whether the agent started working. The daemon wakes idle Herdr sessions that have unannounced mail; `another wake` does it on demand, also through a command transport (tmux, cmux or any tool with a CLI, configured in `transports.json`). Hooks are the fallback everywhere. [WAKE.md](WAKE.md), [DAEMON.md](DAEMON.md).
+- **Wake**: one line delivered into an idle agent's session through a transport, with an answer on whether it was delivered and whether the agent started working. The daemon wakes idle Herdr sessions that have unannounced messages; `another wake` does it on demand, also through a command transport (tmux, cmux or any tool with a CLI, configured in `transports.json`). Hooks are the fallback everywhere. [WAKE.md](WAKE.md), [DAEMON.md](DAEMON.md).
 - **Session row**: what Another knows about one agent session inside a transport: where it runs, its state, its last wake, and whether it needs the owner. `another transport status`. [WAKE.md](WAKE.md).
 - **Stuck**: shown for a session whose last wake was delivered but did not start work. It is not typed into again until it is seen working, one of its hooks runs, or the owner clears it. [WAKE.md](WAKE.md).
 
 ## Other machines
 
 - **Token**: a bearer secret that lets one remote client act as one agent within chosen projects. Every call made with it is audited. [REMOTE.md](REMOTE.md).
-- **Federation**, **hub**, **spoke**: several nodes exchanging signed events through a hub you host. Each node stays authoritative for its own agents, holds and resources. The hub can read the mail it relays. [FEDERATION.md](FEDERATION.md).
+- **Federation**, **hub**, **spoke**: several nodes exchanging signed events through a hub you host. Each node stays authoritative for its own agents, holds and resources. The hub can read the messages it relays. [FEDERATION.md](FEDERATION.md).
 
 ## Acknowledgement versus ownership
 
@@ -71,7 +71,7 @@ Short definitions of the words Another uses, with the places that explain each o
 | Recorded by | `another ack <message-id>` | `another request claim <request-id>` |
 | Means | This agent saw the message | This agent is doing the work |
 | Scope | One agent, one message | One request, at most one owner |
-| Ends with | Nothing; it is a fact about receipt | `request complete` (mails the creator a `Done:` message), `request release`, or `request cancel` by the creator |
+| Ends with | Nothing; it is a fact about receipt | `request complete` (sends the creator a `Done:` message), `request release`, or `request cancel` by the creator |
 | If the agent stops | The ack stays true | The request stays `claimed`. It goes `stale`, and anyone may take it over, once its due time passes or a human confirms Expire in the local dashboard (D42). Without a due time nothing else moves it: the owner releases it or the creator cancels it |
 
 Reading or acknowledging a message never claims its request. A worked example with recorded output is in [REQUESTS.md](REQUESTS.md).

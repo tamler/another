@@ -60,7 +60,7 @@ $ another inbox --agent codex@shop
 codex@shop: 0 unread (0 urgent), 0 awaiting ack, 0 request(s)
 ```
 
-The mail went to the Codex in `billing` and only there. A name that is still unique keeps working bare: `claude` has one registration, so `another inbox --agent claude` answers as `claude@shop`.
+The message went to the Codex in `billing` and only there. A name that is still unique keeps working bare: `claude` has one registration, so `another inbox --agent claude` answers as `claude@shop`.
 
 ```text
 $ another inbox --agent claude
@@ -167,13 +167,13 @@ The installed hooks never hit this: a hook acts as `<client>@<project>` for the 
 | `agent name "codex" is ambiguous: ... one of: codex@shop, codex@billing` | More than one project has the name | Use one of the listed addresses |
 | `unknown agent "codex@payments"; register it first (or sync with its node)` | No project on this node has that slug or path, and no paired node is known by that name | Check `another agent list`; register the agent, or fix the slug |
 | `invalid agent address "codex@shop@local@x": use name, name@project or name@project@node` | More than two `@` | Use one of the three forms |
-| `codex@shop@laptop belongs to another node; agents act only on their own node` | The address is valid but the agent lives on a paired node | A remote agent can receive mail; it cannot be `--agent` or `--from` here |
+| `codex@shop@laptop belongs to another node; agents act only on their own node` | The address is valid but the agent lives on a paired node | A remote agent can receive messages; it cannot be `--agent` or `--from` here |
 
 The last row is the form of the error in the code; it was not part of this run, which had a single node.
 
 ## Across nodes
 
-`name@project` looks at this node's projects. If nothing matches, Another tries the part after the `@` as a node name for a project-less agent on a paired node, which is why the unknown-project message mentions syncing. To reach an agent on another node, write all three parts, `name@project@node`, or `name@@node` for an agent registered there without a project ([FEDERATION.md](FEDERATION.md)). `name@project` does not pick between two nodes that both have a `codex@shop`; the node part does. Requests stay on one node either way; cross-node addresses carry plain mail only.
+`name@project` looks at this node's projects. If nothing matches, Another tries the part after the `@` as a node name for a project-less agent on a paired node, which is why the unknown-project message mentions syncing. To reach an agent on another node, write all three parts, `name@project@node`, or `name@@node` for an agent registered there without a project ([FEDERATION.md](FEDERATION.md)). `name@project` does not pick between two nodes that both have a `codex@shop`; the node part does. Requests stay on one node either way; cross-node addresses carry plain messages only.
 
 ## What was run
 

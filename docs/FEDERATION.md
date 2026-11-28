@@ -42,7 +42,7 @@ Each event audit uses `agent = node:<origin id>` for the node that signed that e
 | Events | Sent to |
 |---|---|
 | Directory: node, project and agent registrations | every paired node |
-| Mail (`message.sent`) | only nodes that host a recipient; mail between agents on one node never leaves it |
+| Messages (`message.sent`) | only nodes that host a recipient; messages between agents on one node stay there |
 | Read and acknowledgement receipts | only the node that sent the message |
 | Activity: sessions, requests, holds, resources | nodes with `read_feed`, plus the owner of a resource being borrowed |
 | `sync.skipped` and `sync.skip_acked` (see "An event that is too large to send") | the nodes the skipped event would have reached. Through a hub on an earlier build, every spoke with `read_feed` (see "With an earlier build" in that section) |
@@ -142,8 +142,8 @@ A paired, unrevoked spoke may redeem a fresh invite to get other permissions or 
 
 What a lost spoke home costs:
 
-- Without `release-name`, the old name stays on the revoked node. Addresses `x@@oldname` keep resolving to the dead node's agents, and mail sent to them is accepted by the hub and never delivered. The new machine's agents have addresses under the new name.
-- With `release-name`, the old node is listed by its id. `x@@oldname` resolves to the new node's agent `x` once that agent is registered and synced, and to nothing before. Mail already sent to the old node's agents stays undelivered; it is not moved to the new node.
+- Without `release-name`, the old name stays on the revoked node. Addresses `x@@oldname` keep resolving to the dead node's agents, and messages sent to them are accepted by the hub and never delivered. The new machine's agents have addresses under the new name.
+- With `release-name`, the old node is listed by its id. `x@@oldname` resolves to the new node's agent `x` once that agent is registered and synced, and to nothing before. Messages already sent to the old node's agents stay undelivered and are never moved to the new node.
 
 Two things you will see after a release, both expected:
 
@@ -166,7 +166,7 @@ It means this home and its hub hold two different keys for one node. A node's ke
 - **The pinned key is wrong.** This home synced, on a build before the hub signed its answers, through something that answered in the hub's place and listed its own key for that node. The home may also hold events that were accepted under that key and has skipped that node's real ones. There is no repair command: replace the home. Make a new home, name it and join with a fresh invite; on the hub, `another pair revoke <old node>` and, to give the new home the old name, `another pair release-name <old node>` (see "Replacing a machine" above).
 - **The hub's key is wrong.** This can only be a hub that is itself a spoke of another hub and whose own home was damaged in the same way: it now signs the wrong key to its spokes. That hub's home is the one to replace.
 
-What a replaced home loses: its node id, and everything that never leaves a node, which is the queue, tokens, OAuth clients and grants, the local pairing history, wake targets and the audit log. What it shared (its agents' registrations, mail and activity) stays on the hub and the other nodes under the old node id.
+What a replaced home loses: its node id, and everything that never leaves a node, which is the queue, tokens, OAuth clients and grants, the local pairing history, wake targets and the audit log. What it shared (its agents' registrations, messages and activity) stays on the hub and the other nodes under the old node id.
 
 From this build on, a list reaches a spoke only in an answer its hub signed, so nothing on the path can pin a key. The one remaining way into this state is to join an invite whose hub key was replaced and to sync without comparing the fingerprint.
 
@@ -224,7 +224,7 @@ To undo it, with commands only:
 3. Victim: `another sync`, `another node name <its old name>`, `another sync`. If the victim should be revoked, as it was before, run `another pair revoke <victim id>` on the hub instead.
 4. The victim's permissions were replaced by the attacker's invite: pair it again with an invite carrying the right ones.
 5. Other spokes: `another sync`, twice if the first still shows the old names.
-6. Mail sent to the taken name between the attacker's rename and its revoke went to the attacker's node and cannot be recalled. To list it, take `T1`, the `ts` of the attacker's `node.renamed` to that name, and `T2`, the `ts` of its `peer.revoked`, then:
+6. Messages sent to the taken name between the attacker's rename and its revoke went to the attacker's node and cannot be recalled. To list it, take `T1`, the `ts` of the attacker's `node.renamed` to that name, and `T2`, the `ts` of its `peer.revoked`, then:
 
    ```sh
    sqlite3 "$ANOTHER_HOME/another.db" "SELECT event_id, ts, actor FROM events WHERE kind = 'message.sent' AND ts BETWEEN <T1> AND <T2> AND payload LIKE '%<attacker node id>%'"
@@ -234,7 +234,7 @@ From now on every change to a peer's name, permissions or revoked state is on re
 
 ## Cross-node behaviour
 
-- **Mail**: `another send --from bob --to carol@@runner …`. Replies, threads and acknowledgements work across nodes. Requests stay node-local: open them only with agents on the same node.
+- **Messages**: `another send --from bob --to carol@@runner …`. Replies, threads and acknowledgements work across nodes. Requests stay node-local: open them only with agents on the same node.
 - **Merged activity feed**: `another activity` shows other nodes' events prefixed with their node name, e.g. `[hub] alice@shop holds shop:src/**`. Message bodies never appear in the feed.
 - **Resources**: `another resources` lists other nodes' resources with their `node` and whether this machine can **reach** them (a TCP connect to an IP-literal endpoint; hostnames are not resolved). A listing checks at most eight live foreign endpoints, with at most 100 ms per connect and a shared 500 ms connect budget. Hostnames, failed probes and entries skipped after either bound show `reachable: false`; that value does not prove an endpoint is down. Borrow checks its endpoint separately, outside the database write transaction, and refuses if the endpoint or owner changed before the lease is recorded. Resources can be borrowed only when reachable and when `borrow_resource` was granted, and the lease is reported back to the owning node. Loopback endpoints are reachable only from the same machine.
 - **Path holds**: holds stay node- and repo-local and are never distributed locks. When an agent acquires a hold that overlaps a live hold on another node, in a project with the **same name**, the result carries a **warning** (`warnings` in JSON, `warning:` lines in the CLI), never a conflict. The comparison with other nodes' holds is best effort: it runs after the acquire has been committed, within one fixed budget of work for the command (about 40 ms), lists at most ten overlapping holds and counts the rest, and when the budget is spent says in one line how many holds of which nodes were not compared (`not_compared` in JSON). A peer decides how many holds it sends and how costly their patterns are to compare, so this is what keeps its holds from slowing a command. A hold from another node whose stored pattern cannot be read (a glob that does not compile, or a row over the limit that an earlier build stored) warns on every acquire in that project until it ends, and the warning names the node and the hold. Details and measurements: [HOLDS.md](HOLDS.md#pattern-size-and-a-pattern-that-cannot-be-read).
@@ -259,7 +259,7 @@ From now on every change to a peer's name, permissions or revoked state is on re
   - it lost none of this spoke's own events, and not the last event the hub sent this spoke (or that event is back at exactly the same sequence number);
   - the hub then writes past the spoke's old pull cursor before the spoke syncs.
 
-  For example, it lost only mail between other nodes, for a spoke without `read-feed`. In that case the hub's new events between the backup's end and that cursor are skipped. A spoke upgraded from a version without these anchors also lacks them until its next pull and push. To rule it out after restoring a hub, run on each spoke:
+  For example, it lost only messages between other nodes, for a spoke without `read-feed`. In that case the hub's new events between the backup's end and that cursor are skipped. A spoke upgraded from a version without these anchors also lacks them until its next pull and push. To rule it out after restoring a hub, run on each spoke:
 
   ```sh
   sqlite3 "$ANOTHER_HOME/another.db" "UPDATE peers SET push_cursor = 0, pull_cursor = 0"
@@ -271,9 +271,9 @@ From now on every change to a peer's name, permissions or revoked state is on re
 
 A sync between honest nodes does not stop because of how much is waiting (D99). Three things bound it: the size of one event this build writes, the size of one request or answer, and the size of the batch or page that fills it.
 
-**One event this build writes** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit. The largest mail an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names. This is a rule for local writes only. An event already in a log, or one a peer sends, is not judged by it: it travels if it fits the transport (below). One that does not fit the transport even alone is skipped and reported, and the events after it travel (see "An event that is too large to send").
+**One event this build writes** is at most 2 MiB (2,097,152 bytes) as it travels: its wire JSON, escaping included, with the sequence number counted as one digit. The largest message an honest node writes to one recipient is 1,837,191 bytes: a 256 KiB body made only of control characters, which cost seven bytes each on the wire, a 300-character subject and the longest names. This is a rule for local writes only. An event already in a log, or one a peer sends, is not judged by it: it travels if it fits the transport (below). One that does not fit the transport even alone is skipped and reported, and the events after it travel (see "An event that is too large to send").
 
-- A local command or tool that would write a larger event is refused as `invalid`, with the kind of event and both sizes, and nothing is written. Mail has no rule on how many agents one message names, so this is what stops a message to thousands of recipients: with the costliest body and the longest names it is refused at roughly 1,500 recipients, with a plain 256 KiB body at roughly 10,000.
+- A local command or tool that would write a larger event is refused as `invalid`, with the kind of event and both sizes, and nothing is written. There is no fixed recipient-count limit, so this is what stops a message to thousands of recipients: with the costliest body and the longest names it is refused at roughly 1,500 recipients, with a plain 256 KiB body at roughly 10,000.
 - The fields that had no size rule each have one, so the caller is told which field is too long: an agent's description 4 KiB and model 200 bytes, a hold's reason 1 KiB and each pattern 4,096 bytes, a request's completion or cancellation note 16 KiB. The CLI prints, for example, `another: agent description is 4097 bytes; the limit is 4096` and exits non-zero; the MCP tools answer `invalid` with the same text. These rules apply to what a local caller writes, including a remote caller of `another serve`. The edit hook's holds and a session start are not held to them and write nothing near them.
 - A heartbeat or a session end over more than 10,000 holds, or 10,000 leases, writes several `hold.renewed`, `hold.released`, `resource.renewed` or `resource.released` events of at most 10,000 ids each in its one transaction, so neither can meet the 2 MiB rule. Up to 10,000 it is one event, as before, and a reader takes the ids event by event.
 - A peer's event is not refused for its size. What bounds it is the transport: it reaches a hub only in a push, so it is at most 8 MiB, and only the signed push of a paired, unrevoked node is read and stored. The other rules for a peer's event (see "Model") are unchanged.
@@ -308,7 +308,7 @@ A spoke reads a pull answer of at most 32 MiB, and a pairing or push answer of a
 
 ## An event that is too large to send
 
-An event that does not fit the transport even alone is skipped, and the skip is reported until you acknowledge it (D-next). It never blocks the events after it and it is never silent. Nothing is deleted and there is no command that removes an event.
+An event that does not fit the transport even alone is skipped, and the skip is reported until you acknowledge it (D104). It never blocks the events after it and it is never silent. Nothing is deleted and there is no command that removes an event.
 
 **What is skipped.** In a spoke's log, one of its own events that alone makes a push over the 8 MiB a hub reads (an event of more than 8,388,595 bytes). In a hub's log, an event that alone makes a pull answer, the node directory included, over the 32 MiB a spoke reads. No build from D99 on writes such an event (it writes at most 2 MiB), but an earlier build could, for example by registering an agent with a description of many megabytes through an MCP tool. The node whose log holds the event (the holder) decides, by this build's limits. Everything before and after the event travels in the same sync.
 
@@ -345,7 +345,7 @@ A value from a marker is put into a printed command only when it is what this so
 2. Each hold it has (`another holds --agent <name>` lists them): `another hold acquire --agent <name> -p <project> <the same paths>`, with `--shared`, `--repo-wide`, `--reason` and `--ttl` as the hold has them. The same hold is sent again; without `-p` from another directory it is a different hold, and without `--shared` a shared hold becomes exclusive or is refused.
 3. Each resource of this node it holds a lease on: `another release <resource id or kind:name> --agent <name>`, then at once `another borrow <the same> --agent <name>`. A borrow without the release only renews, and a renewal brings nothing to a node that never had the lease. Between the two commands the resource has no lease unless another agent holds one: another agent on this node that borrows it in that moment becomes its owner, and if the resource is exclusive this agent's borrow is then refused. If another agent already holds a lease, that agent becomes the owner at the release and this agent comes back as a borrower.
 4. Each resource of another node it borrowed: `another release <resource id> --agent <name>`, then `another borrow <resource id> --agent <name>`. If the borrow is refused, the release has already happened: it is refused when the hub does not grant borrowing, when the resource has no live owner, or when it cannot be reached from this machine.
-5. Mail it sent to other nodes before step 1 is not delivered there and no command delivers it: send it again.
+5. Messages it sent before step 1 stay undelivered on other nodes. Send them again.
 6. `another sync`.
 
 *A hold (`hold.acquired`, `hold.updated`).* Missing: this hold: an agent on another node is not warned before it edits the same files, and renewals of it change nothing there. Steps: `another hold release --agent <agent> <hold id>`; `another hold acquire --agent <agent> -p <project> <paths>`, with `--shared`, `--repo-wide` and `--ttl` as the hold had them, each pattern 4096 bytes or fewer and `--reason` 1024 bytes or fewer; `another sync`.
@@ -378,7 +378,7 @@ While an event is skipped, a node that would have received it treats later event
 
 | Skipped event | On the other nodes | Later events affected |
 |---|---|---|
-| `agent.registered`, first registration | The agent is unknown | Its mail is stored and not delivered, its holds and leases are not shown, until it registers again. Mail sent before that stays undelivered |
+| `agent.registered`, first registration | The agent is unknown | Its messages are stored but held, its holds and leases are not shown, until it registers again. Messages sent before that stay undelivered |
 | `agent.registered`, a later one | Description and model are older | None |
 | `project.ensured` | The project is unknown | The node's agents there have no project in their address and their holds in it are not shown. No build from D99 on can write this event too large |
 | `node.created`, `node.renamed` | The name is older until the next sync's node list | None |
@@ -492,8 +492,8 @@ Because an older hub relays both kinds as activity events, a marker for a messag
 
 ## Limits (v2)
 
-- Mail bodies are readable by the hub that relays them. Host the hub yourself; end-to-end encryption is future work.
+- The hub can read the messages it relays. Host the hub yourself; end-to-end encryption is future work.
 - Hub-and-spoke only, with no mesh. A spoke syncs with one hub.
 - Requests and path holds are node-local.
 - A spoke of a node that is itself a spoke refuses that node's hub's `sync.skipped` markers for other nodes' events: it takes a marker for another node's event only from its own hub. Each such marker is listed once in the sync's rejected events and is not stored.
-- Mail a skipped agent sent to other nodes before it registered again is not delivered there (see "An event that is too large to send"). The query behind the skip report is not bounded against a flood of markers from a paired node.
+- Messages a skipped agent sent before it registered again stay undelivered on other nodes (see "An event that is too large to send"). The query behind the skip report is not bounded against a flood of markers from a paired node.

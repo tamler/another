@@ -20,7 +20,7 @@ A path hold is not a disk lock. The edit hook stops covered Claude Code, Codex a
 
 ### 3. Mid-task notices
 
-Mail can arrive while an agent is working. Installed hooks add a short notice after its next tool call, so the agent can check the message without a person copying it between terminals. https://toanother.one
+Messages can arrive while an agent is working. Installed hooks add a short notice after its next tool call, so the agent can check the message without a person copying it between terminals. https://toanother.one
 
 ### 4. The handoff I type
 
@@ -32,7 +32,7 @@ Both agents were about to start a model server on the same port. One runs `anoth
 
 ### 6. The hook I forgot
 
-Unread mail sat there until the hook existed. `another hook install --client all` backs up the client config and leaves other hooks alone. In Codex you still open `/hooks` and trust them. I forgot that once.
+Unread messages sat there until the hook existed. `another hook install --client all` backs up the client config and leaves other hooks alone. In Codex you still open `/hooks` and trust them. I forgot that once.
 
 ### 7. Hosted clients
 
@@ -44,7 +44,7 @@ I aimed `another wake` at an agent that was mid-edit. Useless. Wake types into a
 
 ### 9. Two machines
 
-Laptop and a box I leave running: federation is a hub I host. Mail crosses. Requests stay on one node. The hub can read the mail it relays. Ordinary SQLite. No end-to-end encryption. I do not want to imply there is.
+Laptop and a box I leave running: federation is a hub I host. Messages cross. Requests stay on one node. The hub can read the messages it relays. Ordinary SQLite. No end-to-end encryption. I do not want to imply there is.
 
 ### 10. The short try
 

@@ -8,7 +8,7 @@ Images used by the repository README and, for the two diagrams, by toanother.one
 | `social-preview.png` | 1280x640 GitHub social preview, same lockup as the site's `og.png` | Same script. Set it under the repository's Settings, Social preview, after merge; the API does not expose that field |
 | `path-holds.svg` | Diagram: a client edit to a held file is stopped by the edit hook and names the holder; a shell edit is not; the agent sends a release request instead | Hand-written SVG, site palette, monospace text |
 | `handoff.svg` | Diagram: a `--request` message opens a request; ack records receipt only; open, claimed, done, release, stale | Hand-written SVG |
-| `mid-task-notice.svg` | Diagram: mail that lands mid-task is announced by the post-tool hook after the next tool call; an idle Herdr agent is woken by the daemon; each message is announced once | Hand-written SVG |
+| `mid-task-notice.svg` | Diagram: a message that arrives mid-task is announced by the post-tool hook after the next tool call; an idle Herdr agent is woken by the daemon; each message is announced once | Hand-written SVG |
 | `demo.gif` | Terminal recording of the Alice and Bob handoff plus a hold conflict, 24 seconds | `asciinema rec` of `demo.cast` below, rendered with `agg` (Menlo 15px, 118 columns, terminal palette from `site/style.css`) |
 | `demo.cast` | The asciinema v3 recording the GIF was rendered from | Recorded 2026-11-12 against a worktree build of `main` with a throwaway `HOME` and `ANOTHER_HOME`, in a temp project named `shop`. No real `~/.another` data, no secrets; the only path in it is `sh ../demo.sh` |
 

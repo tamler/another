@@ -110,7 +110,7 @@ An installed build migrates with no flag, whatever its path: `cargo install`, a 
 
 `build.json` in the home records which build created the database, the first release build to use it (`adopted`) and which build last migrated it, each with its version and its binary's path. The paths are for you to read; they decide nothing. Release use is recorded when a release build creates the home, migrates it or runs a normal command on it; `another doctor`, `another board` and tool hooks write nothing, so they do not count. From then on development builds need the flag for that home. A normal command may also note in `build.json` that the tables were checked. A build from before this record that migrates the home rewrites `build.json` without these notes.
 
-While a build refuses a home, hooks still exit 0 and print nothing, so the session is not interrupted; mail is not announced and edits are not guarded until it is fixed. The reason is written once to `logs/hooks.log` in the home, and any normal command or `another doctor` prints it.
+While a build refuses a home, hooks still exit 0 and print nothing, so the session is not interrupted; messages are not announced and edits are not guarded until it is fixed. The reason is written once to `logs/hooks.log` in the home, and any normal command or `another doctor` prints it.
 
 To restore a backup:
 

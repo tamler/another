@@ -25,13 +25,13 @@ That listens on `127.0.0.1:7468` and opens a browser. `--no-open` only prints th
 ## What you see
 
 - **Overview.** Counts for the last hour and the last day, who is live right now, and anything that wants a look (conflicting holds, stale requests, holds about to lapse).
-- **Agents.** Program, project, unread mail, last seen. Presence is derived: **live** (active and seen within 10 minutes, or active with no last-seen time yet), **idle** (active and seen within 6 hours), otherwise **offline**. Offline for more than a day is folded away until you ask to see it. A busy install collects a lot of those.
+- **Agents.** Program, project, unread messages, last seen. Presence is derived: **live** (active and seen within 10 minutes, or active with no last-seen time yet), **idle** (active and seen within 6 hours), otherwise **offline**. Offline for more than a day is folded away until you ask to see it. A busy install collects a lot of those.
 - **Holds.** Who has which path, exclusive or shared, and when it lapses. Overlapping holds are marked. A clash with the same project name on another machine is a warning, not a lock.
 - **Requests.** Open, claimed and stale, with sender and recipients. Closed ones stay behind a toggle.
 - **Edits.** The last day of the edit hook's record: files it held for an agent before an edit, and edits it stopped because another agent held the file. Later edits under the same hold write nothing, so they are not listed. `another board` shows the same record per project from the command line; see [BOARD.md](BOARD.md).
-- **Mail.** Threads, oldest message first inside a thread. Bodies of messages written on this node are shown. Messages that arrived from another node stay redacted.
+- **Mail tab.** Threads, oldest message first inside a thread. Bodies of messages written on this node are shown. Messages that arrived from another node stay redacted.
 - **Resources.** Live and lapsed leases: model servers, dev servers, ports, GPUs, containers, jobs.
-- **Timeline.** Filter by text, agent, project, kind (`mail`, `request`, `hold`, `resource`, `session`, `federation`, `sync`, `system`) and a time range. The same body rule as mail.
+- **Timeline.** Filter by text, agent, project, kind (`mail`, `request`, `hold`, `resource`, `session`, `federation`, `sync`, `system`) and a time range. The Mail tab and timeline apply the same rules for showing message bodies.
 - **Peers.** Paired nodes, if you federate. An empty list is a normal single machine.
 
 The page keeps itself current with a server-sent event stream and falls back to polling.

@@ -1,6 +1,6 @@
 # Verify a release archive
 
-No GitHub Release of Another has been published as of 27 Nov 2026. This page describes what the release workflow will publish and how to check it, and records a run of those checks against a local fixture archive, labeled as such. Until a release exists, install with Cargo or build from source ([README](../README.md#quickstart)).
+No GitHub Release of Another has been published as of 27 Nov 2026. This page describes what the release workflow will publish and how to check it, and records a run of those checks against a local fixture archive, labeled as such. Install from the repository until a release exists. After a tag is published, you can pin a source install to that tag ([README](../README.md#quickstart)).
 
 ## What the workflow publishes
 
@@ -13,7 +13,7 @@ Pushing a tag `vX.Y.Z` runs [`.github/workflows/release.yml`](../.github/workflo
 | `another-VERSION-TARGET.tar.gz` | `tar -czf` of a folder named `another-VERSION-TARGET` holding the `another` binary, `LICENSE`, `NOTICE`, and `README.md` |
 | `another-VERSION-TARGET.tar.gz.sha256` | `shasum -a 256 another-VERSION-TARGET.tar.gz` |
 
-`TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. The workflow does not publish a combined `SHA256SUMS` file; if one appears on a release page later, the same commands below read it, and `--ignore-missing` skips the archives you did not download.
+`TARGET` is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. The checksum file is one line in the format both `shasum` and `sha256sum` write and read: the hex digest, two spaces, the archive's file name. Use the checksum file for your archive.
 
 Download the archive and its `.sha256` from the same release page, put them in one folder, and run the check from that folder. The file name in the checksum line must match the archive's name on disk, so do not rename the download.
 

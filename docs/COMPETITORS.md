@@ -65,7 +65,9 @@ Another's column describes `main` today. Where a capability is in the v0.1.0 sco
 | Launches or owns sessions | No | non-goal | No | No | Yes |
 | Published release | None | M10 | Early access | Live, with pricing | v0.29.1 |
 
-## Our honest gaps
+## Gaps at the 17 Nov 2026 review
+
+This section records the review baseline. For current implementation and remaining acceptance checks, see the [README status](../README.md#status). The single-node queue, durable results, per-agent claim limits and migration safeguards have landed since this review.
 
 1. **No queue.** The core of the vision is not on `main`. Polyroom has cards and KittyClaw has tickets today. Until M1 ships, Another's answer is a request addressed to one agent, or a markdown file.
 2. **Wake is not confirmed.** Another records that a wake was sent, not that the agent started. Panes sat at a limit menu overnight while Another counted them as woken. KittyClaw sees its runs because it owns them; M5 has to get the same knowledge through a transport.

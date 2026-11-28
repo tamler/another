@@ -823,7 +823,7 @@ fn codex_install_and_status_distinguish_configuration_from_trust() {
     let before = std::fs::read(env.home.join(".codex/hooks.json")).unwrap();
     let status = env.ok(&["hook", "status"]);
     assert!(status.contains("Codex trust is not checked"));
-    assert!(status.contains("no automatic mail or edit-hold coverage"));
+    assert!(status.contains("no automatic message or edit-hold coverage"));
     assert!(status.contains("--dangerously-bypass-hook-trust"));
     let json: Value = serde_json::from_str(&env.ok(&["--json", "hook", "status"])).unwrap();
     let codex = json
